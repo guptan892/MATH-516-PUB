@@ -1,0 +1,1092 @@
+---
+title: "Thermal Heat Flow Analysis"
+author: "Nikita Gupta"
+date: "March 13, 2026"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup}
+#, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+# echo = FALSE hides the code blocks in the final PDF
+# warning/message = FALSE keeps the document clean of R's startup text
+```
+
+## Section 2: Examine and Edit dataset
+```{r}
+#, include=FALSE}
+library(tidyverse) #installed tidyverse
+library(nlme)
+library(ggplot2)
+library(here)
+library(kableExtra)
+library(modelsummary)
+
+# Load the dataset
+file_path <- here("analysis_and_plots/heat_flow_ICE_EPFL.csv")
+df <- read.csv(file_path)
+
+df_clean_v1 <- df %>% filter(!is.na(HF_value)) #remove rows with NA in HF_value
+print(dim(df_clean_v1)) #2638 rows after removing NAs
+print(dim(df)) #2736 rows 
+
+# factorize dataset
+df_clean <- df_clean_v1 %>%
+  mutate(across(
+    c(person, day, session, activity, sex, HF_type),
+    as.factor
+  ))
+```
+
+
+Now do plots to see trends
+
+```{r}
+# Summarize by person, day, session, sensor
+df_grid_summary <- df_clean %>%
+  group_by(person, day, session, HF_type) %>%
+  summarize(mean_HF = mean(HF_value), .groups = 'drop')
+
+# Create Faceted Spider Plot
+ggplot(df_grid_summary, aes(x = session, y = mean_HF, group = person, color = person)) +
+  geom_line(alpha = 0.4) +
+  geom_point(size = 1) + stat_summary(aes(group = 1), fun = mean, geom = "line", 
+               color = "black", size = 1.2) +
+  facet_wrap (day ~ HF_type) #, scales = "free_y") + # Scales="free_y" lets you see the slopes clearly for each body part
+  theme_minimal() +
+  labs(title = "Heat Flow Evolution Across Sessions",
+       subtitle = "Rows: Day (1=Cold, 2=Warm) | Columns: Sensor Type",
+       x = "Session Number",
+       y = "Mean Heat Flow (W/m²)") +
+  theme(legend.position = "none")
+```
+
+## Section 3: Examine Residuals for Linear, Determine transformations (if any)
+
+
+Look at residuals spread. by session, activity, days. NOT BY sensor or sex!
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+lm_base <- lm(HF_value ~ factor(session) + factor(activity)+ factor(HF_type) + factor(day) + factor(sex), data = df_clean)
+df_clean$resids <- residuals(lm_base)
+
+
+df_pivot_day_narem <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot_day_narem, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+Look at residuals spread. by day, activity, and session. Not by sensor or sex!
+```{r}
+df_pivot <- df_clean %>%
+  filter(session %in% c(1, 4)) %>%
+  pivot_wider(
+    id_cols = c(person, day, activity, HF_type),
+    names_from = session,
+    values_from = resids,
+    names_prefix = "res_s"
+  )
+
+# Plot residuals of Session 1 vs Session 4 , by sensor and activity, colored by person to check for independence of measures across sessions
+ggplot(df_pivot, aes(x = res_s1, y = res_s4, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(day ~ activity) +
+  labs(
+    title = "Residual Correlation: Session 1 vs Session 4",
+    subtitle = "By Sensor and Activity | Colors represent individual participants",
+    x = "Residuals from Session 1",
+    y = "Residuals from Session 4",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+## Section 4: Run model with fixed effects
+1. Run the log model with all fixed effects
+
+```{r}
+mdl1_log <- gls(
+  log(HF_value) ~ day + session + activity + HF_type + sex,
+  data   = df_clean,
+  method = "ML"
+)
+print(summary(mdl1_log),4)
+```
+
+2. Run anovas to compare it to models without one of the variables (backwards selection)
+```{r}
+# print("No day")
+mdl1_log_no_day <- gls(
+  log(HF_value) ~ session + (activity) +  (HF_type) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log, mdl1_log_no_day))
+
+# print("No session")
+mdl1_log_no_session <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log, mdl1_log_no_session))
+
+# print("No activity")
+mdl1_log_no_activity <- gls(
+  log(HF_value) ~  (day) +  (session) +  (HF_type) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log, mdl1_log_no_activity))
+
+# print("No sensor")
+mdl1_log_no_sensor <- gls(
+  log(HF_value) ~  (day) +  (session) +  (activity) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log, mdl1_log_no_sensor))
+
+# print("No sex")
+mdl1_log_no_sex <- gls(
+  log(HF_value) ~  (day) +  (session) +  (activity) +  (HF_type), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log, mdl1_log_no_sex))
+
+
+#Option 1: Run the "Drop-One" analysis
+anova_summary <- drop1(mdl1_log, test = "Chisq")
+print(anova_summary)
+
+
+#option 2: Combine the anovas
+
+#helper function to get anova outputs
+get_baseline_metrics <- function(orig, name) {
+  data.frame(
+    Model = name,
+    Df = attr(logLik(orig), "df"),
+    AIC = round(AIC(orig), 4),
+    BIC = round(BIC(orig), 4),
+    LogLik = round(as.numeric(logLik(orig)), 4),
+    stringsAsFactors = FALSE
+  )
+}
+
+get_anova_outputs <- function(orig, new, name) {
+  res <- anova(orig, new)
+  data.frame(
+    Model = name,
+    Df = attr(logLik(new), "df"),
+    AIC = round(res$AIC[2],4),
+    BIC = round(res$BIC[2],4),
+    LogLik = round(res$logLik[2],4),
+    LRT_Stat = round(res$L.Ratio[2],4),
+    p_value = round(res$`p-value`[2],4)
+  )
+}
+
+anova_summary_manual_mdl1 <- bind_rows(
+  get_baseline_metrics(mdl1_log, "Full Model"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_day, "Drop Day"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_session, "Drop Session"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_activity, "Drop Activity"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_sensor, "Drop Sensor"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_sex, "Drop Sex")
+)
+
+print(anova_summary_manual_mdl1)
+```
+
+The above says to not include session, so we remove it! Then we compare the effects of removing the other variables to that model.
+
+```{r}
+# print("No session and no day")
+mdl1_log_no_session_no_day <- gls(
+  log(HF_value) ~   (activity) +  (HF_type) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl1_log_no_session_no_day))
+
+# print("No session and no activity")
+mdl1_log_no_session_no_activity <- gls(
+  log(HF_value) ~  (day) +  (HF_type) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl1_log_no_session_no_activity))
+
+# print("No session and no sensor")
+mdl1_log_no_session_no_sensor <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (sex), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl1_log_no_session_no_sensor))
+
+
+# print("No session and no sex")
+mdl1_log_no_session_no_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type), 
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl1_log_no_session_no_sex))
+
+anova_summary_manual_mdl1_nosession <- bind_rows(
+  get_baseline_metrics(mdl1_log_no_session, "Current Model (No Session)"),
+  get_anova_outputs(mdl1_log_no_session, mdl1_log_no_session_no_day, "Drop Day"),
+  get_anova_outputs(mdl1_log_no_session, mdl1_log_no_session_no_activity, "Drop Activity"),
+  get_anova_outputs(mdl1_log_no_session, mdl1_log_no_session_no_sensor, "Drop Sensor"),
+  get_anova_outputs(mdl1_log_no_session, mdl1_log_no_session_no_sex, "Drop Sex")
+)
+
+print(anova_summary_manual_mdl1_nosession)
+```
+
+## Takeaway: Given the above, we propose a fixed effect model of mdl1_log_no_session:  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex).
+- Activity results in a drop in BIC, so we could consider removing it
+- Sex barely improves BIC, so we could consider removing it
+- For now, including - will re-examine at the end.
+
+## Section 5.1: Run model with interaction terms, v1
+Now try the ten possible interaction terms.
+
+```{r}
+#HF_type*day
+#HF_type*activity
+#HF_type*sex
+#HF_type*session
+#day*activity
+#day*sex
+#day*session
+#activity*sex
+#activity*session
+#sex*session
+mdl2_log_no_session_all_interactives <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type *session) + (day * activity) + (day * sex) + (day * session) + (activity * sex) + (sex * session), #(activity * session)  - df issue (too many vars)
+  data   = df_clean,
+  method = "ML"
+)
+print(summary(mdl2_log_no_session_all_interactives))
+
+#now: try running just the model with fixed effects and this interactive effect
+#same issue:gls fit singular, rank 18...
+# mdl2_log_no_session_interact_activity_session <- gls(
+#   log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex)+ (activity * session), # - df issue (too many vars)
+#   data   = df_clean,
+#   method = "ML"
+# )
+```
+
+
+We find that :
+- p-values are too high for all coefficients (over 0.05) for the following; note that 0.05 is not a strict cutoff, but a good starting point to determine which interaction effects to examine:
+#sex*session
+#day*sex
+#day*activity
+
+#not enough degrees freedom:
+#activity*session
+
+## Section 5.2: Run model with interaction terms
+
+Now, try adding in each interactive term one by one (of the ones not automatically excluded). Test with an ANOVA.
+
+```{r}
+
+#sex*session
+mdl2_log_no_session_interact_sex_session<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (sex * session) ,
+  data   = df_clean,
+  method = "ML"
+)
+
+#day*sex
+dl2_log_no_session_interact_sex_day<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (sex * day) ,
+  data   = df_clean,
+  method = "ML"
+)
+
+#day*activity
+dl2_log_no_session_interact_day_activity<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (activity * day) ,
+  data   = df_clean,
+  method = "ML"
+)
+
+
+#HF_type*day
+mdl2_log_no_session_interact_sensor_day <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_day))
+
+#HF_type*activity
+mdl2_log_no_session_interact_sensor_activity <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * activity) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_activity))
+
+#HF_type*sex
+mdl2_log_no_session_interact_sensor_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * sex) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_sex))
+
+
+#HF_type*session
+mdl2_log_no_session_interact_sensor_session <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * session) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_session))
+
+
+#activity*sex
+mdl2_log_no_session_interact_activity_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (activity * sex) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_activity_sex))
+
+#sex*session
+mdl2_log_no_session_interact_session_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session * sex) ,
+  data   = df_clean,
+  method = "ML"
+)
+# print(anova(mdl1_log_no_session, mdl2_log_no_session_interact_session_sex))
+
+#day*session
+mdl2_log_no_session_interact_session_day <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session * day) ,
+  data   = df_clean,
+  method = "ML"
+)
+
+
+anova_summary_manual_mdl1_nosession_interact1 <- bind_rows(
+  get_baseline_metrics(mdl1_log_no_session, "Current Model (No Session)"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_day, "Interact Sensor & Day"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_activity, "Interact Sensor & Activity"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_sex, "Interact Sensor & Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_session, "Interact Sensor & Session"),
+  get_anova_outputs(mdl1_log_no_session, dl2_log_no_session_interact_day_activity, "Interact Activity & Day"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_activity_sex, "Interact Activity & Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sex_session, "Interact Session & Sex"),
+  get_anova_outputs(mdl1_log_no_session, dl2_log_no_session_interact_sex_day, "Interact Day & Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_session_day, "Interact Day & Session")
+)
+
+#day*session
+#activity*session
+
+print(anova_summary_manual_mdl1_nosession_interact1)
+```
+
+This suggests we should include the below. Both their AIC and BIC decreases, and they have significant p-values from the ANOVA test.
+
+- HF_type * day
+
+- HF_type * activity
+
+
+We should potentially include the below. Although their AIC decreases and they have significant p-values from the ANOVA test, their BIC increased.
+
+- HF_type * sex 
+
+- HF_type * session
+
+- Day * session
+
+
+And not include the below, as both their AIC and BIC increase, and they do not have significnat p-values from the ANOVA test.
+
+- activity * day
+
+- activity * sex
+
+- session * sex
+
+- day * sex
+
+
+And we do not include the following due to issues with degrees of freedom:
+
+- activity * sessino
+
+
+
+## Section 5.3
+
+Now, try adding all give of the suggested interactive variables, and then compare that to only having four interactive variables
+```{r}
+#HF_type*day, HF_type * activity, HF_type * sex, HF_type * session, day * session
+mdl3 <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session) + (day * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove hf_type * day
+mdl3a <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) +(HF_type * activity) + (HF_type * sex) + (HF_type * session) + (day * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove hf_type * activity
+mdl3b <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * sex) + (HF_type * session) + (day * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove hf_type * sex
+mdl3c <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * session) + (day * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove hf_type * session
+mdl3d <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove day * session
+mdl3e <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (day * session),
+  data   = df_clean,
+  method = "ML"
+)
+
+anova_summary_manual_mdl1_nosession_interact2 <- bind_rows(
+  get_baseline_metrics(mdl3, "Current Model"),
+  get_anova_outputs(mdl3, mdl3a, "Drop Sensor & Day"),
+  get_anova_outputs(mdl3, mdl3b, "Drop Sensor & Activity"),
+  get_anova_outputs(mdl3, mdl3c, "Drop Sensor & Sex"),
+  get_anova_outputs(mdl3, mdl3d, "Drop Sensor & Session"),
+  get_anova_outputs(mdl3, mdl3e, "Drop Day & Session")
+)
+print(anova_summary_manual_mdl1_nosession_interact2)
+```
+
+
+Now, we see a similar story. 
+
+Both AIC and BIC decrease (and p-value is stat. sig) when we include the following:
+
+- Sensor & Day
+
+- Sensor & Activity
+
+However, BIC increases when we include the following:
+
+- Sensor & Sex
+
+- Sensor & Session
+
+- Day & Session
+
+
+For now, we will take that to mean to include all interactive variables! Note that including sensor & Session + Day & Session adds session back to the model, in general. We will remove variables later, after looking at random intercepts.
+
+
+
+
+## Section 6: Run model with random intercepts
+
+## Section 6.1: Does adding the person random intercept do anything (with interaction variables)?
+
+Now, I will test if there's inter-person variation.
+
+```{r}
+#final model before random effects
+#  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) 
+#                   + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session),
+
+mdl4_no_random_with_interact_reml <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session) + (day * session) + (session),
+  data   = df_clean,
+  method = "REML"
+)
+
+mdl4_random_person_with_interact_reml <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session) + (day * session) + (session),
+  random = ~ 1 | person,
+  data   = df_clean,
+  method = "REML"
+)
+
+#anova to compare
+print(anova(mdl4_no_random_with_interact_reml, mdl4_random_person_with_interact_reml))
+
+#now see if the variance of the random effect is 0.
+print(summary(mdl4_random_person_with_interact_reml))
+
+#yes - it stdev = 0.0795, so diff levels. however there is still leftover noise (0.2819). ICC is .073 (0.0795^2/(0.0795+0.2819)^2) --> meaning that person effect only explains 7.3% of unexplained variance.
+
+```
+
+Yes, the adding person as the random intercept does decrease AIC
+
+### Section 6.2: Does adding HF_type as random intercept help?
+```{r}
+
+#hat about comparing the HF_type intercept with interaction effects, to the baseline person random intercept with interaction effects?
+mdl4_random_person_sensor_with_interact_reml <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (sex) + (session) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session) + (day * session), 
+  random = ~ 1 | person/HF_type,
+  data   = df_clean,
+  method = "REML"
+)
+print(anova(mdl4_random_person_sensor_with_interact_reml, mdl4_random_person_with_interact_reml))
+
+
+#now see if the variance of the random effect is 0.
+print(summary(mdl4_random_person_sensor_with_interact_reml))
+
+#it is not! actually, sensor is more important than person.
+```
+
+
+## Section 6.5: Check other random intercepts.
+```{r testname3}
+mdl4_random_person_sensor_activity_with_interact_reml <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (sex) + (session) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session)+ (day * session), 
+  random = ~ 1 | person/HF_type/activity,
+  data   = df_clean,
+  method = "REML"
+)
+
+#anova to compare
+print(anova(mdl4_random_person_sensor_with_interact_reml, mdl4_random_person_sensor_activity_with_interact_reml))
+
+mdl4_random_person_sensor_day_with_interact_reml<- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (sex) + (session) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session)+ (day * session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "REML"
+)
+
+#how much of variance does this explain
+print(summary(mdl4_random_person_sensor_day_with_interact_reml))
+#day explains a lot of the unexplained residuals!! we should keep that.
+
+
+#anova to compare
+print(anova(mdl4_random_person_sensor_with_interact_reml, mdl4_random_person_sensor_day_with_interact_reml))
+
+```
+
+## Section 7: Let's test removing the variables we were initially unsure of (overlaps with high p-values from final model above)
+
+Stuff with high pvalues:
+
+- day
+
+- sex
+
+- session (although session 4 is significant)
+
+- sensor & sex
+
+- sensor & session (some)
+
+
+```{r testname2}
+mdl4_random_person_sensor_day_with_interact<- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (sex) + (session) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session)+ (day * session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+#what if I remove the interactive variables that I was unsure of?
+mdl4_random_person_sensor_day_with_interact_nodaysession <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (session) + (sex) + (HF_type * day) +(HF_type * sex) + (HF_type * activity) + (HF_type * session) , 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+mdl4_random_person_sensor_day_with_interact_nosensorsession <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (session) + (sex) + (HF_type * day) +(HF_type * sex) + (HF_type * activity) +  (day*session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+mdl4_random_person_sensor_day_with_interact_nosensorsex <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (session) + (sex) + (HF_type * day)  + (HF_type * activity) + (HF_type * session)  +  (day*session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove sex (and thus no sensor sex)
+mdl4_random_person_sensor_day_with_interact_nosex <- lme(
+  fixed  = log(HF_value) ~ (day) +  (activity) +  (HF_type) +  (session) + (HF_type * day)  + (HF_type * activity) + (HF_type * session)  +  (day*session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+#remove day (and htus interactions)
+mdl4_random_person_sensor_day_with_interact_noday <- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (session) + (HF_type * activity) + (HF_type * session) + (sex) + (HF_type * sex), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+mdl4_random_person_sensor_day_with_interact_nosession<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (HF_type * activity) + (HF_type * day) + (sex) + (HF_type * sex), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+mdl5_activity_sensor_day_sensoractivity_sensorday<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day)  + (HF_type * activity) + (HF_type * day), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "ML"
+)
+
+anova_summary_manual_mdl4_nosession_interact <- bind_rows(
+  get_baseline_metrics(mdl4_random_person_sensor_day_with_interact, "Current Model"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_nodaysession, "Drop Day & Session"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_nosensorsession, "Drop Sensor & Session"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_nosensorsex, "Drop Sensor & Sex"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_nosex, "Drop Sex"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_noday, "Drop Day"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl4_random_person_sensor_day_with_interact_nosession, "Drop Session"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday, "Final"),
+  get_anova_outputs(mdl4_random_person_sensor_day_with_interact, mdl5_activity_sensor_day_sensoractivity_sensorday, "Final no session")
+)
+print(anova_summary_manual_mdl4_nosession_interact)
+
+```
+
+
+We should definitely drop sensor and sex. 
+
+Dropping day & session does nothing - AIC+BIC increase, and p-value is 0 for it. So we will keep it.
+
+Dropping sensor & session increases AIC & decreases BIC, so we will drop it.
+
+Just dropping sensor & session is better than dropping session overall, so we will keep session.
+
+Dropping sensor & sex is unequivocally good. Relatedly, dropping sex overall is even better. So we will drop everything sex.
+
+Dropping day overall is not good, so we will keep it.
+
+Propose to drop sex, sensor & sex, sensor & session.
+
+## Takeaway: Final model: fixed = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), , random = ~ 1 | person/HF_type/day,
+
+
+
+## Section 8: Look at random slopes!
+
+Initial hypothesis: people cool down at different rates. Try adding random slope for session. However, there's convergence issues...
+
+```{r testname}
+#hypothesis: people cool down at different rates
+
+
+mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday_reml<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = ~ 1 | person/HF_type/day,
+  data   = df_clean,
+  method = "REML"
+)
+print(summary(mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday_reml))
+```
+
+```{r testname123}
+# mdl6_rs_session_reml<- lme(
+#   fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+#   random = list(person = ~ session, HF_type = ~ 1, day = ~ 1),
+#   data   = df_clean,
+#   method = "REML",
+#   control = lmeControl(maxIter = 200, 
+#                          msMaxIter = 200, 
+#                          tolerance = 1e-6, 
+#                          niterEM = 100,
+#                          opt = "nlminb") #basically, increase iterations
+# )
+
+# print(anova(mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday_reml, mdl6_rs_session_reml))
+
+# print(summary(mdl6_rs_session_reml))
+
+#for random effects, we care about the variance! --> is the stdev high?
+# for fixed effects, just the estimates --> anova, AIC/BIC, pval
+```
+
+It fails when we try to do this for REML. Instead, try numerical. (Also works because when ran for ML, correlation between the sessions was high)
+
+```{r test_session_2}
+df_clean$session_num <- as.numeric(as.character(df_clean$session))
+
+mdl6_rs_session_num_reml<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+
+print(anova(mdl5_activity_sensor_day_session_sensoractivity_sensorday_sessionday_reml, mdl6_rs_session_num_reml))
+print(summary(mdl6_rs_session_num_reml))
+
+```
+
+
+Ok now make everything numerical. 
+
+```{r anothertest}
+mdl6_rs_session_num_full_reml <- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session_num) + (HF_type * activity) + (HF_type * day) + (day * session_num), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+
+print(anova(mdl6_rs_session_num_reml, mdl6_rs_session_num_full_reml))
+
+print(summary(mdl6_rs_session_num_full_reml))
+
+```
+
+
+
+
+## Section 9: Look at different covariance structures
+Normal residuals
+```{r }
+mdl6_rs_session_num_res <- residuals(mdl6_rs_session_num_reml, type = "normalized")
+acf(mdl6_rs_session_num_res, main = "ACF of BAU residuals")
+```
+
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+df_clean$resids_fin <- residuals(mdl6_rs_session_num_reml)
+
+
+df_pivot <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids_fin,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2 (Independent)",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+```{r 123}
+mdl6_rs_session_num_ar1temp_reml<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  correlation = corAR1(form = ~ 1 | person/HF_type/day),
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+```
+
+```{r 345}
+mdl6_rs_session_num_ar1temp_res <- residuals(mdl6_rs_session_num_ar1temp_reml, type = "normalized",)
+
+```
+
+```{r 1254}
+acf(mdl6_rs_session_num_ar1temp_res, main = "ACF of AR1 residuals")
+```
+
+```{r 164}
+
+print(anova(mdl6_rs_session_num_reml, mdl6_rs_session_num_ar1temp_reml))
+```
+
+
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+df_clean$resids_fin_ar1 <- residuals(mdl6_rs_session_num_ar1temp_reml)
+
+
+df_pivot <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids_fin_ar1,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2 (AR1)",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+
+
+```{r }
+mdl6_rs_session_num_arh1temp_reml_day<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  correlation = corAR1(form = ~ 1 | person/HF_type/day),
+  weights = varIdent(form = ~ 1 | day),
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+
+print(anova(mdl6_rs_session_num_ar1temp_reml, mdl6_rs_session_num_arh1temp_reml_day))
+
+
+mdl6_rs_session_num_arh1temp_reml_day_res <- residuals(mdl6_rs_session_num_arh1temp_reml_day, type = "normalized")
+acf(mdl6_rs_session_num_arh1temp_reml_day_res, main = "ACF of ARH1 residuals (day)")
+```
+
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+df_clean$resids_fin_arh1_day <- residuals(mdl6_rs_session_num_arh1temp_reml_day)
+
+
+df_pivot <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids_fin_arh1_day,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2 (ARH1, Day)",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+
+
+
+```{r }
+mdl6_rs_session_num_arh1temp_reml_activity<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  correlation = corAR1(form = ~ 1 | person/HF_type/day),
+  weights = varIdent(form = ~ 1 | activity),
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+
+print(anova(mdl6_rs_session_num_ar1temp_reml, mdl6_rs_session_num_arh1temp_reml_activity))
+
+
+mdl6_rs_session_num_arh1temp_reml_activity_res <- residuals(mdl6_rs_session_num_arh1temp_reml_activity, type = "normalized")
+acf(mdl6_rs_session_num_arh1temp_reml_activity_res, main = "ACF of ARH1 residuals (actiity)")
+```
+
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+df_clean$resids_fin_arh1_activity <- residuals(mdl6_rs_session_num_arh1temp_reml_activity)
+
+
+df_pivot <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids_fin_arh1_activity,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2 (ARH1, Activity)",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+
+```{r }
+mdl6_rs_session_num_arh1temp_reml_sensor<- lme(
+  fixed  = log(HF_value) ~  (activity) +  (HF_type) +  (day) + (session) + (HF_type * activity) + (HF_type * day) + (day * session), 
+  random = list(person = ~ session_num, HF_type = ~ 1, day = ~ 1),
+  data   = df_clean,
+  method = "REML",
+  correlation = corAR1(form = ~ 1 | person/HF_type/day),
+  weights = varIdent(form = ~ 1 | HF_type),
+  control = lmeControl(maxIter = 200, 
+                         msMaxIter = 200, 
+                         tolerance = 1e-6, 
+                         niterEM = 100,
+                         opt = "nlminb") #basically, increase iterations
+)
+
+print(anova(mdl6_rs_session_num_ar1temp_reml, mdl6_rs_session_num_arh1temp_reml_sensor))
+
+
+mdl6_rs_session_num_arh1temp_reml_sensor_res <- residuals(mdl6_rs_session_num_arh1temp_reml_sensor, type = "normalized")
+acf(mdl6_rs_session_num_arh1temp_reml_sensor_res, main = "ACF of ARH1 residuals (sensor)")
+```
+
+```{r}
+# Base model with all main effects, no interactions, no person random effect
+df_clean$resids_fin_arh1_sensor <- residuals(mdl6_rs_session_num_arh1temp_reml_sensor)
+
+
+df_pivot <- df_clean %>%
+  pivot_wider(
+    id_cols = c(person, session, activity, HF_type),
+    names_from = day,
+    values_from = resids_fin_arh1_sensor,
+    names_prefix = "res_day"
+  ) %>%
+  # Remove cases where data is missing for one of the two days
+  filter(!is.na(res_day1) & !is.na(res_day2))
+
+ggplot(df_pivot, aes(x = res_day1, y = res_day2, color = factor(person))) +
+  geom_point(alpha = 0.7, size = 2) +
+  # Dashed line y=x represents perfect correlation
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") + 
+  facet_grid(session ~ activity) +
+  labs(
+    title = "Residual Correlation: Day 1 vs Day 2 (ARH1, Sensor)",
+    subtitle = "Checking for independence across different temperature environments",
+    x = "Residuals from Day 1 (24°C)",
+    y = "Residuals from Day 2 (18°C)",
+    color = "Person"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+Final: do arh1 for sensor??

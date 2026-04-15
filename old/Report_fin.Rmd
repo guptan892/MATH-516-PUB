@@ -1,0 +1,1703 @@
+---
+title: "(need to change)Project 2 Linear Mixed Model"
+author: "** **"
+date: "**March 15, 2026**"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: no
+always_allow_html: true
+urlcolor: blue
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \usepackage[tableposition=bottom]{caption}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, include=FALSE, comment = "", prompt = FALSE)
+knitr::opts_chunk$set(fig.align="center") 
+```
+
+
+```{r packages}
+#download packages
+library(tidyverse) #installed tidyverse
+library(nlme)
+library(ggplot2)
+library(here)
+library(kableExtra)
+library(modelsummary)
+library(dplyr)
+library(performance)
+```
+
+```{r load data}
+
+file_path <- here("heat_flow_ICE_EPFL.csv")
+
+#Load the dataset
+data <- read.csv(file_path)
+```
+
+# Abstract
+
+# Introduction
+
+# Exploratory Data Analysis
+
+An exploratory data analysis was conducted, aiming to understand the distributional properties of the heat flow measurements and identify preliminary trends regarding inter-individual and intra-individual variability, as well as the relationships between the different sensors.
+
+## Dataset Overview
+
+The dataset consists of measurements from 24 participants (12 female, 12 male) monitored over two separate days. The only environmental difference between Day 1 and Day 2 is the temperature: Day 1 is 24 $^\circ$C while Day 2 is 18 $^\circ$ C. While the original experiment captured data every second, this analysis utilizes the mean heat flow per activity in each session monitored by 6 sensors to address the research goals.
+
+98 out of 2736 observations have missing heat flow measurements, and were directly dropped. 
+
+### Nikita note to add: Specifically, the activity walking only has data for sessions 1 & 3, and the activity standing does not have data for session 2 on day 2.
+
+
+```{r examine data, include=FALSE}
+head(data)
+colSums(is.na(data))
+nrow(data)
+```
+
+All variables are categorical: `day` has 2 levels ("1" and "2"); `session` has 4 levels ("1", "2", "3" and "4"); `activity` has 3 levels ("sitting", "standing" and "walking"); `sex` has 2 levels ("F" and "M"); `HF_type`(sensor ID) has 6 levels ("HF_2", "HF_3", "HF_5", "HF_7", "HF_8", "HF_16").
+
+### Nikita note to add: Note sensors correspond with XYZ body part. add a note that it is somethign to examine for future analysis - other seensors.
+
+```{r data cleaning, include=FALSE, warning=FALSE, message=FALSE}
+
+
+data_clean <- data %>%
+  drop_na() %>%
+  mutate(
+    person = as.factor(person),
+    day = factor(day, levels = c("1", "2")), 
+    session = factor(session, levels = c("1", "2", "3", "4")),
+    activity = factor(activity, levels = c("sitting", "standing", "walking")),
+    sex = as.factor(sex),
+    HF_type = as.factor(HF_type),
+    sensor_num = as.numeric(HF_type),
+    session_num = as.numeric(session),
+    Block_ID = as.factor(paste(person, day, session, activity, sep="_"))
+  ) %>%
+  arrange(person, HF_type, day, session, activity)
+```
+
+```{r output baseline for dummy encoding, include = FALSE}
+# baselines
+levels(data_clean$sex)[1]
+levels(data_clean$activity)[1]
+levels(data_clean$day)[1]
+levels(data_clean$session)[1]
+levels(data_clean$HF_type)[1] 
+```
+
+
+## Visual Evidence for Fixed Effects
+
+To determine which variables influence heat flow, we examined the measurements across different experimental conditions. The exploratory plots indicate that heat flow is not constant and is influenced by every categorical variable in the study.
+
+Figure \@ref(fig:check-linearity-visually) displays heat flow during the sitting activity, partitioned by Day, Session, Sensor, and Sex.
+
+For Sensor Type, we can see there are distinct vertical offsets between panels (e.g., HF_16 vs. HF_1), showing that different body locations have different baseline heat flow. Comparing the top row (Day 1, $24^{\circ}C$) to the bottom row (Day 2, $18^{\circ}C$) reveals a clear shift in mean heat flow, confirming a strong environmental effect. The solid linear fit lines across the four sessions often show non-zero slopes, suggesting that heat flow changes over the course of the day even when activity is held constant. The red (Female) and blue (Male) lines are frequently separated, indicating that biological sex influences thermal regulation.
+
+```{r check-linearity-visually, warning=FALSE, fig.cap="\\footnotesize{Sitting's Heat Flow Over Time by Day, Session, Sensor and Sex}", include = TRUE}
+#(Below is not needed anymore for checking linearity, we treat session as
+#factor)
+# make session to be continuous variable for now
+# spaghetti plot + faceting
+data_sitting <- data_clean %>%
+  filter(activity == "sitting")
+
+ggplot(data_sitting, aes(x = session_num, y = HF_value, color = sex)) +
+  geom_point(alpha = 0.1) +
+  
+  # Flexible LOESS curves (Dashed lines, one for M and one for F)
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE, linetype = "dashed", size = 0.5) +
+  
+  # Straight Linear regression lines (Solid lines, one for M and one for F)
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, linetype = "solid", size = 0.5) +
+  
+  # Grid: Rows = Activity, Columns = Sensor
+  facet_grid(day ~ HF_type) +
+  
+  # Manually set colors for clarity (e.g., Males = Blue, Females = Red)
+  scale_color_manual(values = c("M" = "blue", "F" = "red")) +
+  
+  theme_minimal() +
+  labs(
+    title = "(Sitting) Heat Flow Over Time by Day, Session, Sensor and Sex",
+    subtitle = "Solid lines = Linear Fit (lm) | Dashed lines = Flexible Fit (loess)",
+    x = "Session (1 to 4)",
+    y = "Heat Flow (HF_value)",
+    color = "Sex"
+  )
+```
+
+Figure \@ref(fig:plot-to-justify-fixed-effect) focuses on Day 1 to highlight the impact of activity: Comparing the rows for sitting, standing, and walking reveals that heat flow varies with physical movement. 
+
+```{r plot-to-justify-fixed-effect, warning=FALSE, fig.cap="\\footnotesize{Day 1's Heat Flow Over Time by Activity, Sensor and Sex}", include = TRUE}
+data_day1 <- data_clean %>% filter(day == "1")
+
+ggplot(data_day1, aes(x = session_num, y = HF_value, color = sex)) +
+  geom_point(alpha = 0.1) + 
+  
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE, linetype = "dashed", size = 0.5) +
+  
+  # Straight Linear regression lines (Solid lines, one for M and one for F)
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, linetype = "solid", size = 0.5) +
+  
+  facet_grid(activity ~ HF_type) +
+  
+  scale_color_manual(values = c("M" = "blue", "F" = "red")) +
+  
+  theme_minimal() +
+  labs(
+    title = "(Day 1)Heat Flow Over Time by Activity, Sensor and Sex",
+    subtitle = "Solid lines = Linear Fit | Dashed = LOESS | Grid = Activity+Day vs Sensor",
+    x = "Session (1 to 4)",
+    y = "Heat Flow (HF_value)",
+    color = "Sex"
+  ) 
+```
+
+Because the plots and physiological intuition suggest that every categorical variable exerts a fixed effect on the response, all predictors were carried forward into the modeling stage.
+
+# Statistical Description of the Methods
+
+To analyze the factors influencing human heat flow while accounting for the complex hierarchical and temporal dependencies inherent to the experimental design, a Linear Mixed Model (LMM) was employed.
+
+## Fixed-Effects Optimization and Transformation
+
+### Nikita note: add note of what section the log stuff was shown, removed some description, discuss tests that zhuo ran
+
+An initial naive ordinary least squares (OLS) regression was fitted to identify the baseline relationships between the predictors and the response variable and justify the inclusion of all 5 variables. Diagnostic plots of this initial model revealed significant heteroscedasticity and heavy-tailed residuals. To satisfy the assumptions of linear modeling and stabilize the variance, a natural logarithm transformation was applied to the heat flow measurements ($Y = \log(\text{HF\_value})$).
+
+### Nikita note: discuss part F-tests. I think i used the likelihood ratio test, basically, from my anovas. I think that would be preferred - can we change this?
+
+To determine the optimal fixed-effects structure, a systematic, multi-step model-building approach was employed. First, partial F-tests were utilized to evaluate the significance of predictors in a main-effects-only model.
+
+For a given categorical predictor or interaction term with $r$ degrees of freedom (corresponding to $k-1$ coefficients for a variable with $k$ levels), the partial F-test evaluates whether the inclusion of the term provides a statistically significant improvement to the model's goodness-of-fit. The null hypothesis posits that all $r$ coefficients associated with the specific term are simultaneously zero:
+
+$$H_0: \beta_1 = \beta_2 = \dots = \beta_r = 0$$
+
+To test this, the F-statistic is calculated by comparing the Residual Sum of Squares (RSS) of a reduced model (excluding the term in question) against a full model (including the term):
+
+$$F = \frac{(RSS_{\text{reduced}} - RSS_{\text{full}}) / r}{RSS_{\text{full}} / (n - p)}$$
+
+(Where $n$ represents the total number of observations, and $p$ represents the total number of parameters estimated in the full model. Note that $r$ is equivalent to $p_{\text{full}} - p_{\text{reduced}}$).
+
+Under the null hypothesis, this test statistic follows an F-distribution with $r$ and $n-p$ degrees of freedom ($F_{r, n-p}$). The mathematical validity of this test assumes that the model's residual errors are independent, identically distributed, and follow a normal distribution, $\epsilon \sim \mathcal{N}(0, \sigma^2)$.
+
+
+### nikita note: should we go through all of this? I think it is better to just explain what an interaction term is, and mention we used a similar methodology to the ANOVA done on the fixed effects... like, how is it diff?
+
+Next, to identify relevant interaction terms, a preliminary marginal screening of ten theoretically plausible two-way interactions was conducted. To test whether the addition of each interaction term significantly improved the model (Null Hypothesis ($H_0$): The coefficient for the interaction term is exactly zero, $\beta_{\text{interaction}} = 0$), individual partial F-tests were performed. 
+
+### Nikita note: I don't even look at the FWER.... we can mention later?
+
+Because conducting multiple simultaneous hypothesis tests artificially inflates the probability of Type I errors (false positives), a Bonferroni correction was applied to control the family-wise error rate (FWER). Based on a standard family-wise alpha level of $0.05$ distributed across $10$ tests, the adjusted significance threshold was established at $p < 0.005$. 
+
+
+### nikita note: again, i do not use partial F-test
+
+To finalize the fixed-effects structure, a marginal backward elimination procedure (using partial F-test) was conducted for the resulting model. Furthermore, to adhere to the principle of marginality, any main effect involved in a significant two-way interaction was retained in the model, regardless of its independent main-effect significance.
+
+
+## Hierarchical Random-Effects Structure
+
+The experimental design involved repeated measurements from the same $24$ participants across multiple days, sessions, and physical activities. An assumption of standard linear regression is that all observations are independent. However, because multiple heat flow measurements were taken from the same individuals, unobserved subject-specific physiological traits (such as baseline metabolic rate or core temperature) were expected to cause intra-subject correlation.
+
+To appropriately account for this unobserved heterogeneity and resolve the violation of independence, a Linear Mixed Model (LMM) was employed. 
+
+Mathematically, an LMM extends the general linear model by partitioning the total variance into fixed and random components. In matrix notation, the general model is defined as:
+
+$$\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \mathbf{Z}\mathbf{b} + \boldsymbol{\epsilon}$$
+
+Where:
+
+$\mathbf{y}$ is the vector of the response variable ($\log(\text{HF\_value})$).
+
+$\mathbf{X}$ is the design matrix for the fixed effects (the controlled experimental conditions such as Day, Session, and Activity).
+
+$\boldsymbol{\beta}$ is the vector of fixed-effect coefficients, representing the population-average responses.
+
+$\mathbf{Z}$ is the design matrix for the random effects.This matrix can contain both indicator variables for grouping factors (yielding random intercepts) and continuous/categorical covariates (yielding random slopes).
+
+$\mathbf{b}$ is the vector of random effects. In this study, it captures both a subject's unique baseline shift (a random intercept) and their specific physiological trajectory in response to a changing experimental condition (a random slope). It is assumed to be normally distributed with mean zero and covariance matrix $\mathbf{G}$, such that $\mathbf{b} \sim \mathcal{N}(\mathbf{0}, \mathbf{G})$.
+
+$\boldsymbol{\epsilon}$ is the vector of residual errors, assumed to be normally distributed with mean zero and covariance matrix $\mathbf{R}$, such that $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{R})$.
+
+By introducing the random effects vector $\mathbf{b}$, the LMM defines the marginal covariance matrix of the response $\mathbf{y}$ as:
+
+$$Var(\mathbf{y}) = \mathbf{Z}\mathbf{G}\mathbf{Z}^T + \mathbf{R}$$
+
+Unlike standard Ordinary Least Squares (OLS) regression, which assumes a strictly diagonal covariance matrix where all observations are completely independent, this $\mathbf{Z}\mathbf{G}\mathbf{Z}^T$ structure mathematically permits non-zero covariances between observations belonging to the same participant. Furthermore, by allowing $\mathbf{G}$ to estimate both random intercepts and random slopes, the model accounts for the fact that participants not only start at different thermal baselines, but also adapt to the environmental temperature changes at entirely different physiological rates.
+
+## Residual Variance and Temporal Correlation
+
+In standard linear mixed-effects models, the residual errors ($\epsilon_{ijk}$) are conventionally assumed to be conditionally independent and identically distributed with a constant variance $\sigma^2$. However, given the longitudinal nature of this experimental design, the assumption of residual independence may be overly restrictive. Physiologically, heat flow is a continuous, dynamic process; therefore, it is hypothesized that short-term, unexplained biological variations exhibit temporal autocorrelation. Specifically, a participant's unobserved physiological state during one session is likely to influence their state in the immediately subsequent session, with this residual correlation decaying as the time gap increases.
+
+To mathematically account for this temporal decay across consecutive measurements, a first-order Autoregressive AR(1) correlation structure was implemented. This temporal memory was explicitly nested within the experimental day (person/HF_type/day). This boundary specification ensures that residual autocorrelation decays continuously across consecutive sessions within a single day, but is forced to assume complete independence across the overnight gap between Day 1 and Day 2.
+
+Let $\rho$ be the autoregressive parameter, and $|k - k'|$ be the chronological time lag between two measurement instances. Under AR(1) assumption, the covariance between any two residuals from the same sensor on the same person is defined as:
+
+$$Cov(\epsilon_{ijk}, \epsilon_{ijk'}) = \sigma^2 \rho^{|k - k'|} I(\text{Day}_{ijk} = \text{Day}_{ijk'})$$
+
+Where the indicator function $I(\cdot)$ returns $1$ if the measurements occurred on the same day, and $0$ if they occurred on different days, breaking the temporal correlation overnight.
+
+While the AR(1) specification successfully captures temporal memory, it still imposes a strict assumption of homoscedasticity, forcing a single, universal residual variance ($\sigma^2$) across all observations. Physiologically, different sensor placements (e.g., wrist versus chest) experience varying degrees of ambient noise interference and physical contact stability.
+
+To resolve this limitation, the model's residual structure was upgraded to an Autoregressive Heteroscedastic ARH(1) formulation. This structure retains the autoregressive temporal decay ($\rho$) but relaxes the constant variance assumption by calculating a unique, independent residual variance ($\sigma_j^2$) for each specific sensor type $j$.
+
+The final residual errors are distributed as a vector $\boldsymbol{\epsilon}_{ij} \sim \mathcal{N}(\mathbf{0}, \mathbf{R}_{ij})$ , where the elements of the block-diagonal residual covariance matrix $\mathbf{R}_{ij}$  are formalized as:$$Cov(\epsilon_{ijk}, \epsilon_{ijk'}) = \sigma_j^2 \rho^{|k - k'|} I(\text{Day}_{ijk} = \text{Day}_{ijk'})$$
+
+This final $\mathbf{R}$ matrix allows the baseline magnitude of the physiological noise to scale up or down depending on the specific physical sensor, while preserving the chronological decay of that heat flow noise as the experimental day progresses.
+
+
+
+
+
+# Nikita's Notes (outside of results)
+
+
+- How to justify use of LMM - discuss more...
+
+- Add coefficients for each equation, and discuss whether used ML or REML (and impacts?)
+
+- Explain ICC 
+
+- When discussing ICCs, just create tables to show it?? Each row is a model, and each column is a variable?
+
+- Add final summary table to show coefficients, etc of final model; add discussion!
+
+- discuss adding activity to ar1 - better correlation? 
+
+- Explain AIC, BIC? likelihood ratio test stat? Log likelihood?
+
+
+```{r check missing data}
+#are NAs by sex?
+sex_na_summary <- data %>%
+  group_by(sex) %>%
+  summarise(
+    Total_Rows = n(),
+    Missing_HF = sum(is.na(HF_value)),
+    Percent_Missing = round((Missing_HF / Total_Rows) * 100, 2)
+  )
+print(sex_na_summary)
+
+#are NAs by activity and session and day?
+activity_session_day_na_summary <- data %>%
+  group_by(activity, session, day) %>%
+  summarise(
+    Total_Rows = n(),
+    Missing_HF = sum(is.na(HF_value)),
+    Percent_Missing = round((Missing_HF / Total_Rows) * 100, 2)
+  )
+print(activity_session_day_na_summary)
+
+
+person_na_summary <- data %>%
+  group_by(person) %>%
+  summarise(
+    Total_Rows = n(),
+    Missing_HF = sum(is.na(HF_value)),
+    Percent_Missing = round((Missing_HF / Total_Rows) * 100, 2)
+  )
+print(person_na_summary)
+
+activity_session_day_sensor_na_summary <- data %>%
+  group_by(activity, session, day, HF_type) %>%
+  summarise(
+    Total_Rows = n(),
+    Missing_HF = sum(is.na(HF_value)),
+    Percent_Missing = round((Missing_HF / Total_Rows) * 100, 2)
+  )
+print(activity_session_day_sensor_na_summary, n =120)
+```
+
+
+
+# Results
+
+## Initial Model
+
+```{r naive linear model}
+
+naive_lm <- lm(HF_value ~ session + activity + day + HF_type + sex, data = data_clean)
+
+summary(naive_lm)
+#Also based on the significance for each coefficients, we should include all of the predictors.
+
+```
+
+```{r check assumptions naive linear model}
+par(mfrow = c(2, 2))
+plot(naive_lm)
+```
+
+
+```{r residuals distribution before log-transform}
+hist(resid(naive_lm), breaks = 30, probability = TRUE, col = "lightblue", main = "Histogram of Residuals", xlab = "Residual Error")
+lines(density(resid(naive_lm)), col = "red", lwd = 2)
+```
+
+```{r log transformed naive linear model}
+log_naive_lm <- lm(log(HF_value) ~ session + activity + day + HF_type + sex, data = data_clean)
+summary(log_naive_lm)
+par(mfrow = c(2, 2))
+plot(log_naive_lm)
+```
+
+```{r check-assumptions, include = TRUE, fig.width=10, fig.height=10, fig.align='center',out.width="100%", fig.cap = "\\footnotesize{The QQ-plot of the Model 0 (the raw (untransformed) model) shows an approximately normal model with slightly heavy tails, but the Residuals vs Fitted Values plot shows heteroscedastic residuals, with variance increasing as fitted values increase. Model 1 (the log-transformed model) corrects the right heavy tail but the left tail deviates more, and the Scale-Location plot shows fairly homoscedastic residuals.}"}
+
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 2), oma = c(5, 0, 3, 0))
+#2 rows 2 columns
+#oma = outer margins to have space for caption
+
+#NAIVE (row 1)
+# Plot 2: Normal Q-Q
+plot(naive_lm, which = 2, main = "Model 0 (Raw): Normality (QQ)", sub = "", caption = "") #sub means do not show normal subtitles, manually create my own
+# Plot 3: residuals vs fitted
+plot(naive_lm, which = 1, main = "Model 0 (Raw): Residuals vs Fitted Values", sub = "", caption = "") #caption means do not show normal subtitles - replace with main
+
+#LOG (row 2)
+# Plot 2: Normal Q-Q
+plot(log_naive_lm, which = 2, main = "Model 1 (Log): Normality (QQ)", sub = "", caption = "")
+# Plot 3: residuals vs fitted
+plot(log_naive_lm, which = 1, main = "Model 1 (Log): Residuals vs Fitted Values", sub = "", caption = "")
+
+
+# caption_text<- 
+
+# wrapped_caption <- paste(strwrap(caption_text, width = 150), collapse = "\n")
+
+mtext("Diagnostic Comparison of Raw & Log Linear Models", 
+      side = 3, line = 0, outer = TRUE, cex = 1.2, font = 2)
+
+# mtext(wrapped_caption, 
+#       side = 1, line = 2, outer = TRUE, cex = 0.8)
+```
+
+As seen in Figure \@ref(fig:check-assumptions),  applying a simple linear model (Model 0: $\text{HF\_value} \sim \text{session} + \text{activity} + \allowbreak \text{day} + \text{HF\_type} + \text{sex}$) shows that the residuals are approximately normal (with heavy tails), but heteroscedastic. Transforming the response variable (Model 1: $\log(\text{HF\_value})$) resulted in homoscedasticity and corrected the heavy right tail, but introduced more left-skew in the residuals. We prioritize homoscedasticity and use Model 1 (the log model) going forward, to ensure reliable parameter estimation and significance testing.
+
+
+```{r}
+
+fit_naive <- fitted(naive_lm)
+res_naive <- residuals(naive_lm)
+
+fit_log <- fitted(log_naive_lm)
+res_log <- residuals(log_naive_lm)
+
+# Calculate Correlation for Heteroscedasticity - closer to 0 means heteroscedastic
+het_corr_naive <- cor(fit_naive, abs(res_naive))
+het_corr_log <- cor(fit_log, abs(res_log))
+
+#Calculate Correlation for Normality (Q-Q Correlation) - closer to 1 means more normal
+qq_naive <- cor(sort(res_naive), qnorm(ppoints(length(res_naive))))
+qq_log <- cor(sort(res_log), qnorm(ppoints(length(res_log))))
+
+log_naive_comparison <- data.frame(
+  Metric = c("Normality", "Heteroscedasticity"),
+  Naive_Model = c(round(qq_naive, 4), round(het_corr_naive, 4)),
+  Log_Model   = c(round(qq_log, 4), round(het_corr_log, 4))
+)
+```
+
+```{r check-assumptions-math, include = FALSE}
+
+kable(log_naive_comparison, 
+      col.names = c("Metric", "Model 0 (Raw)", "Model 1 (Log)"),
+      align = "lrr",
+      booktabs = TRUE, #right aligns numbers
+      caption = "\\footnotesize{Mathematical diagnostics comparison between Model 0 (raw) and Model 1 (log-transformed model), comparing normality (correlation between actual and theoretically normal residuals, with values closer to 1 indicating normality) and heteroscedasticity (correlation between fitted values and residuals, with values closer to 0 indicating heteroscedasticity). While Model 1 shows slightly worse normality, it is significantly closer to homoscedasticity.}") %>%
+    kable_styling(latex_options = "hold_position", 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Mathematical Diagnostic Comparison of Model 0 & Model 1" = 3), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE)
+
+```
+
+
+## Fixed Effects
+
+```{r check what fixed effects to include}
+mdl1_log <- gls(
+  log(HF_value) ~ day + session + activity + HF_type + sex,
+  data   = data_clean,
+  method = "ML"
+)
+mdl1_log_no_day <- gls(
+  log(HF_value) ~ session + (activity) +  (HF_type) +  (sex), 
+  data   = data_clean,
+  method = "ML"
+)
+mdl1_log_no_session <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex), 
+  data   = data_clean,
+  method = "ML"
+)
+mdl1_log_no_activity <- gls(
+  log(HF_value) ~  (day) +  (session) +  (HF_type) +  (sex), 
+  data   = data_clean,
+  method = "ML"
+)
+mdl1_log_no_sensor <- gls(
+  log(HF_value) ~  (day) +  (session) +  (activity) +  (sex), 
+  data   = data_clean,
+  method = "ML"
+)
+mdl1_log_no_sex <- gls(
+  log(HF_value) ~  (day) +  (session) +  (activity) +  (HF_type), 
+  data   = data_clean,
+  method = "ML"
+)
+
+#helper function to get anova outputs
+get_baseline_metrics <- function(orig, name) {
+  data.frame(
+    Model = name,
+    Df = attr(logLik(orig), "df"),
+    AIC = round(AIC(orig)),
+    BIC = round(BIC(orig)),
+    LogLik = round(as.numeric(logLik(orig))),
+    stringsAsFactors = FALSE
+  )
+}
+
+#note that type=marginal means it is an F test!!
+get_anova_outputs <- function(orig, new, name) {
+  res <- anova(orig, new) #, type = "marginal" doesnt matter if pass 2 models; uses chi-squared
+  data.frame(
+    Model = name,
+    Df = attr(logLik(new), "df"),
+    AIC = round(res$AIC[2]),
+    BIC = round(res$BIC[2]),
+    LogLik = round(res$logLik[2]),
+    LRT_Stat = round(res$L.Ratio[2],2),
+    p_value = res$`p-value`[2]
+  )
+}
+
+anova_summary_manual_mdl1 <- bind_rows(
+  get_baseline_metrics(mdl1_log, "Model 1 (Full Model)"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_day, "Drop Day"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_session, "Drop Session"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_activity, "Drop Activity"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_sensor, "Drop Sensor"),
+  get_anova_outputs(mdl1_log, mdl1_log_no_sex, "Drop Sex")
+)
+
+print(anova_summary_manual_mdl1)
+
+anova_summary_manual_mdl1_cleaned <- anova_summary_manual_mdl1 %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<
+                     
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+```
+
+
+As seen in Table \@ref(tab:fixed-effects-table), although Model 1 includes all fixed effects ($\log(\text{HF\_value}) \sim \text{session} + \text{activity} + \allowbreak \text{day} + \text{sensor} + \text{sex}$), a backwards selection process was conducted to ensure parsimony. We evaluated each variable by comparing the full model to nested models where one term was removed, using the Likelihood Ratio Test (LRT) and changes in information criteria (AIC and BIC).
+
+At first glance, all variables are statistically significant except for the model dropping the session variable ($\log(\text{HF\_value}) \sim \text{activity} + \text{day} + \allowbreak \text{sensor} + \text{sex}$), as the p-value from the  likelihood ratio test of this model versus the full model is not below 0.05 ($p=0.1691$). Additionally, although the models that drop activity and drop sex are technically statistically significant ($p\text{-values} < 0.01$), these models show a unique characteristic of having slightly higher AICs than the full model, but lower or similar BICs. This discrepancy implies that although these variables improve prediction, the improvement may not be large enough to justify including the variables. In this case (and similar cases further in the analysis), the variables are included but will be re-examined in final model pruning.
+
+As such, the final fixed effect model was Model 2 ($\log(\text{HF\_value}) \sim \text{ activity + day + sensor + sex}$).
+
+
+## Interaction Terms
+
+We further examined fixed effects by examining the value of adding all possible interaction terms to the model, as shown in Table \@ref(tab:interactive-terms-table). Testing adding each interaction term against against Model 2 ($\text{HF\_value} \sim \text{ activity + day + sensor + sex}$), we saw that adding the following interaction terms results in models with worse (or similar) AIC & BIC than the current model without interaction terms, and thus did not add them to the model: Activity & Day, Activity & Sex, Session & Sex, Day & Sex, Day & Session. 
+
+Technically, adding the interaction of Day & Session results in a p-value of 0.0118, below 0.05. However, this interaction increased the BIC and barely decreases the AIC, so we chose not to include it in the model. Note that the interaction of Acitivity & Session was not tested - because there is no data for certain interactions (ex. walking & session 2, walking & session 4), the model cannot run.
+
+The interaction of Sensor with the other possible variables (Day, Activity, Sex, and Session) all have low p-values (<0.001) and result in decreased AIC, although two interaction terms (Sensor and Sex, and Sensor and Session) result in increased BIC. Table \@ref(tab:fixed-effects-table) showed a similar story - both Session and Sex decreased AIC slightly, but increased BIC. Similarly, we include these interaction terms for now and will prune the model at the end.
+
+```{r interactive tests}
+
+#sex*session
+mdl2_log_no_session_interact_sex_session<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (sex * session) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#day*sex
+dl2_log_no_session_interact_sex_day<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (sex * day) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#day*activity
+dl2_log_no_session_interact_day_activity<- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (activity * day) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+
+#HF_type*day
+mdl2_log_no_session_interact_sensor_day <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#HF_type*activity
+mdl2_log_no_session_interact_sensor_activity <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * activity) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#HF_type*sex
+mdl2_log_no_session_interact_sensor_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * sex) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+
+#HF_type*session
+mdl2_log_no_session_interact_sensor_session <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * session) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+
+#activity*sex
+mdl2_log_no_session_interact_activity_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (activity * sex) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#sex*session
+mdl2_log_no_session_interact_session_sex <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session * sex) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#day*session
+mdl2_log_no_session_interact_session_day <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session * day) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+#session*activity
+#error: Error in `glsEstimate()`:! computed "gls" fit is singular, rank 18
+#we are missing some data (NAs) - ex walking for session 2 & 4, likely the reason?
+# mdl2_log_no_session_interact_session_activity <- gls(
+#   log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session * activity) ,
+#   data   = data_clean,
+#   method = "ML"
+# )
+
+anova_summary_manual_mdl1_nosession_interact1 <- bind_rows(
+  get_baseline_metrics(mdl1_log_no_session, "Model 2 (No Interaction Terms)"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_day, "Interact Sensor and Day"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_activity, "Interact Sensor and Activity"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_sex, "Interact Sensor and Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sensor_session, "Interact Sensor and Session"),
+  get_anova_outputs(mdl1_log_no_session, dl2_log_no_session_interact_day_activity, "Interact Activity and Day"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_activity_sex, "Interact Activity and Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_sex_session, "Interact Session and Sex"),
+  get_anova_outputs(mdl1_log_no_session, dl2_log_no_session_interact_sex_day, "Interact Day and Sex"),
+  get_anova_outputs(mdl1_log_no_session, mdl2_log_no_session_interact_session_day, "Interact Day and Session")
+)
+
+
+print(anova_summary_manual_mdl1_nosession_interact1)
+
+
+anova_summary_manual_mdl1_nosession_interact1_cleaned <- anova_summary_manual_mdl1_nosession_interact1 %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+print("hi")
+print(ncol(anova_summary_manual_mdl1_nosession_interact1_cleaned))
+
+# Clean the Data Frame
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+```
+
+
+```{r interactive-terms-table, include = TRUE}
+
+kable(anova_summary_manual_mdl1_nosession_interact1_cleaned, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      row.names = FALSE,
+      escape = FALSE, 
+      caption = "\\footnotesize{The top row (Model 2) is the row without any interaction terms. Each subsequent row represents a model where only one interaction term was added to Model 2. The LRT Statistic and P-Value are derived from Likelihood Ratio Tests comparing the new model to Model 2 via ANOVA. Note all models were fit using Maximum Likelihood (ML), to compare across models.}") %>%
+    kable_styling(latex_options = c("scale_down","hold_position"),  
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Interaction Terms: Likelihood Ratio Test Summary" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE) %>% #highlight main row
+    row_spec(1, italic = TRUE)
+```
+
+This results in Model 3: ($\log(\text{HF\_value}) \sim \text{activity} + \text{day} + \text{sensor} + \text{sex} + \text{sensor} * \text{activity} + \allowbreak \text{sensor} * \text{day} + \text{sensor} * \text{sex} + \text{sensor} * \text{session} + \text{session}$). Note that session is added back into the model automatically, as the interaction of sensor and session is included, due to the principle of marginality. Table \@ref(tab:interaction-terms-table-2) shows the results of checking if removing any of the four interaction terms improves Model 3. This showed a similar story to the individual tests of adding interaction terms—the inclusion of the interactions of Sensor and Sex, and Sensor and Session, slightly decrease AIC but increase BIC. 
+
+```{r}
+#HF_type*day, HF_type * activity, HF_type * sex, HF_type * session, day * session
+mdl3 <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (session) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) + (HF_type * session),
+  data   = data_clean,
+  method = "ML"
+)
+
+#remove hf_type * day
+mdl3a <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) +(session) +(HF_type * activity) + (HF_type * sex) + (HF_type * session),
+  data   = data_clean,
+  method = "ML"
+)
+
+#remove hf_type * activity
+mdl3b <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) +(session) + (HF_type * day) + (HF_type * sex) + (HF_type * session),
+  data   = data_clean,
+  method = "ML"
+)
+
+#remove hf_type * sex
+mdl3c <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) +(session) + (HF_type * day) + (HF_type * activity) + (HF_type * session),
+  data   = data_clean,
+  method = "ML"
+)
+
+#remove hf_type * session, and session
+mdl3d <- gls(
+  log(HF_value) ~  (day) +  (activity) +  (HF_type) +  (sex) + (HF_type * day) + (HF_type * activity) + (HF_type * sex) ,
+  data   = data_clean,
+  method = "ML"
+)
+
+anova_summary_manual_mdl1_nosession_interact2 <- bind_rows(
+  get_baseline_metrics(mdl3, "Model 3 (Four Interaction Terms)"),
+  get_anova_outputs(mdl3, mdl3a, "Drop Sensor and Day"),
+  get_anova_outputs(mdl3, mdl3b, "Drop Sensor and Activity"),
+  get_anova_outputs(mdl3, mdl3c, "Drop Sensor and Sex"),
+  get_anova_outputs(mdl3, mdl3d, "Drop Sensor and Session")
+)
+print(anova_summary_manual_mdl1_nosession_interact2)
+
+anova_summary_manual_mdl1_nosession_interact2_cleaned <- anova_summary_manual_mdl1_nosession_interact2 %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+```
+
+```{r interaction-terms-table-2, include = TRUE}
+
+kable(anova_summary_manual_mdl1_nosession_interact2_cleaned, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Model selection of interaction terms via backwards elimination. Model 3 includes the four interaction terms previously noted. Each subsequent row represents a model where only one interaction term was dropped from Model 3. Note that for the last row, Drop Sensor and Session, the fixed effect Session is dropped as well (Session was only included in Model 3 because the interaction of Sensor and Session was added). The LRT Statistic and P-Value are derived from Likelihood Ratio Tests comparing the reduced model to Model 3. Note all models were fit using Maximum Likelihood (ML), to compare across models.}") %>%
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Backwards Selection of Interaction Terms: Likelihood Ratio Test Summary" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE) %>% #highlight main row
+    row_spec(1, italic = TRUE) 
+```
+
+
+
+## Random Intercepts
+
+```{r Boxplot of Residuals by Person}
+
+# residuals added to dataframe
+data_clean$residuals_model1 <- resid(log_naive_lm)
+
+ggplot(data_clean, aes(x = person, y = residuals_model1, fill = sex)) +
+  geom_boxplot(alpha = 0.7) +
+  # red line: perfect independent residuals should be centered at 0
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Residuals by Person for Model 1, fixed-effect-only model",
+    x = "Participant",
+    y = "Residual Error"
+  )
+
+
+data_clean$residuals_model3 <- resid(mdl3)
+
+ggplot(data_clean, aes(x = person, y = residuals_model3, fill = sex)) +
+  geom_boxplot(alpha = 0.7) +
+  # red line: perfect independent residuals should be centered at 0
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Motivation for LMM: Residuals by Person (Model 3)",
+    subtitle = "Systematic shifts away from zero prove that errors within an individual are correlated.",
+    x = "Participant",
+    y = "Residual Error (Observed - Predicted)"
+  )
+```
+
+We hypothesize there is inter-individual variability. To determine if there is inter-individual variability, we added a random intercept for each person, creating Model 4: ($\log(\text{HF\_value}) \sim \text{activity} + \text{day} + \text{sensor} + \text{sex} + \text{sensor} * \text{activity} + \allowbreak \text{sensor} * \text{day} + \text{sensor} * \text{sex} + \text{sensor} * \text{session} + \text{session}$). This assumes that all individuals have unique baselines for heat flow, regardless of if they are performing the same activity and/or are at the same temperature. Note the models in this section were run using REML to ensure estimates of variance components are not biased, unless explicitly stated otherwise.
+
+```{r random intercept model}
+
+mdl3_reml <- gls(log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+          data = data_clean, 
+          method = "REML")
+
+mdl4a_reml <- lme(fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+          random = ~ 1 | person, #unique intercept for each person
+          data = data_clean, 
+          method = "REML")
+
+summary(mdl4a_reml)
+
+anova(mdl3_reml, mdl4a_reml)
+```
+
+```{r random intercept model person}
+print(VarCorr(mdl4a_reml))
+
+mdl4a_var <- as.numeric(VarCorr(mdl4a_reml))
+print(mdl4a_var )
+
+#these are the variances
+print(mdl4a_var[1])
+print(mdl4a_var[2])
+
+mdl4a_var_person <- mdl4a_var[1]
+mdl4a_var_residual <- mdl4a_var[2]
+
+mdl4a_icc <- mdl4a_var_person/(mdl4a_var_person+mdl4a_var_residual)
+mdl4a_icc_res <- mdl4a_var_residual/(mdl4a_var_person+mdl4a_var_residual)
+print(mdl4a_icc)
+print(mdl4a_icc_res)
+```
+
+
+```{r}
+anova_mdl3_mdl4 <- bind_rows(
+  get_baseline_metrics(mdl3_reml, "Model 3"),
+  get_anova_outputs(mdl3_reml, mdl4a_reml, "Model 4")
+)
+
+anova_mdl3_mdl4_cleaned <- anova_mdl3_mdl4 %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+```
+
+```{r create-table-randint-person, include = TRUE}
+
+kable(anova_mdl3_mdl4_cleaned, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Impact of adding a random intercept for person (Model 4) to the fixed-effect only model (Model 3). Note this uses REML to compare models, as fixed effects are not changing. As such, the final p-values should be divided by 2. Given the p-value is already extremely low, this has no impact on the takeaway that we should include the Random Intercept for Person. Note models were fit using Restricted Maximum Likelihood (REML), as fixed effects are the same between models.}")  %>%
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Likelihood Ratio Test for Random Intercept for Person" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE) 
+```
+
+
+The Intraclass Correlation Coefficient (ICC) (also known to as intra-individual coefficient here) for Model 4 was 0.0791, implying that ~8% of the variance is due to differences between people (and 92% is unexplained). This suggests there is some inter-individual variability. Table \@ref(tab:create-table-randint-person) shows that this also reduces AIC and BIC significantly, 
+
+```{r random intercept model person activity}
+
+mdl4b_reml <- lme(fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+          random = ~ 1 | person/activity, #unique intercept for each person
+          data = data_clean, 
+          method = "REML")
+
+print(VarCorr(mdl4b_reml))
+
+mdl4b_var <- as.numeric(VarCorr(mdl4b_reml))
+print(mdl4b_var )
+
+#these are the variances
+print(mdl4b_var[1])
+print(mdl4b_var[2])
+print(mdl4b_var[3])
+print(mdl4b_var[4])
+print(mdl4b_var[5])
+print(mdl4b_var[6])
+
+
+mdl4b_var_person <- mdl4b_var[2]
+mdl4b_var_activity <- mdl4b_var[4]
+mdl4b_var_residual <- mdl4b_var[5]
+mdl4b_var_total <- mdl4b_var_person + mdl4b_var_activity + mdl4b_var_residual
+
+mdl4b_icc_person <- round(mdl4b_var_person / mdl4b_var_total, 4)
+mdl4b_icc_activity <- round(mdl4b_var_activity / mdl4b_var_total, 4)
+mdl4b_icc_res <- round(mdl4b_var_residual / mdl4b_var_total, 4)
+
+print("icc person")
+print(mdl4b_icc_person)
+
+print("icc activity")
+print(mdl4b_icc_activity)
+print("icc residual")
+print(mdl4b_icc_res)
+```
+
+We then examined if a nested activity-level random effect was necessary. The ICC for person remains the same as in model 4 (0.0791), and the ICC of activity (within person) is 0, implying adding activity as a random intercept adds no value - the effect of activity does not vary randomly between people.
+
+```{r random intercept model person sensor}
+
+mdl4c_reml <- lme(fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+          random = ~ 1 | person/HF_type, #unique intercept for each person
+          data = data_clean, 
+          method = "REML")
+
+print(VarCorr(mdl4c_reml))
+
+mdl4c_var <- as.numeric(VarCorr(mdl4c_reml))
+print(mdl4c_var )
+
+#these are the variances
+print(mdl4c_var[1])
+print(mdl4c_var[2])
+print(mdl4c_var[3])
+print(mdl4c_var[4])
+print(mdl4c_var[5])
+print(mdl4c_var[6])
+
+
+mdl4c_var_person <- mdl4c_var[2]
+mdl4c_var_sensor <- mdl4c_var[4]
+mdl4c_var_residual <- mdl4c_var[5]
+mdl4c_var_total <- mdl4c_var_person + mdl4c_var_sensor + mdl4c_var_residual
+
+mdl4c_icc_person <- round(mdl4c_var_person / mdl4c_var_total, 4)
+mdl4c_icc_sensor <- round(mdl4c_var_sensor / mdl4c_var_total, 4)
+mdl4c_icc_res <- round(mdl4c_var_residual / mdl4c_var_total, 4)
+
+print("icc person")
+print(mdl4c_icc_person)
+
+print("icc sensor")
+print(mdl4c_icc_sensor)
+
+print("icc residual")
+print(mdl4c_icc_res)
+```
+
+```{r random intercept model person sensor but remove person!}
+
+mdl4d_reml <- lme(fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+          random = ~ 1 | HF_type, #unique intercept for each person
+          data = data_clean, 
+          method = "REML")
+
+print(VarCorr(mdl4d_reml))
+
+mdl4d_var <- as.numeric(VarCorr(mdl4d_reml))
+print(mdl4d_var )
+
+#these are the variances
+print(mdl4d_var[1])
+print(mdl4d_var[2])
+print(mdl4d_var[3])
+print(mdl4d_var[4])
+
+
+mdl4d_var_sensor <- mdl4d_var[1]
+mdl4d_var_residual <- mdl4d_var[2]
+mdl4d_var_total <- mdl4d_var_sensor + mdl4d_var_residual 
+
+mdl4d_icc_sensor <- round(mdl4d_var_sensor / mdl4d_var_total, 4)
+mdl4d_icc_res <- round(mdl4d_var_residual / mdl4d_var_total, 4)
+
+print("icc sensor")
+print(mdl4d_icc_sensor)
+print("icc residaul")
+print(mdl4d_icc_res)
+```
+
+```{r table 5 anova check}
+print(anova(mdl3_reml, mdl4a_reml))
+print(anova(mdl4a_reml, mdl4c_reml))
+print(anova(mdl4c_reml, mdl4d_reml))
+```
+
+We then examined if a nested sensor-level random intercept was necessary (Model 5). The ICC for person is now 0.0184, lower than in model 4 (0.0791), and the ICC of sensor (within person) is 0.3772, with 60% of the variance unexplained. This implies that the major source of clustering is at the sensor level, and not individual level.
+
+Removing the person random intercept (resulting in a sensor-only random intercept model) results in the significantly lower ICC for sensor (0.0159), with 98% of the variance left unexplained. This implies that the sensor by itself is not the primary driver of variance; instead, there is a shared baseline amongst sensors belonging to the same individual. Thus, we kept the nested sensor-level random intercept model (model 5).
+
+```{r anova sensor ri}
+
+anova_mdl5 <- anova(mdl4c_reml, mdl4d_reml)
+anova_mdl5_clean <- data.frame(
+  Model = c("Model 5: Random Intercept: Person and Nested Sensor", "Random Intercept: Sensor only"),
+  Df = as.numeric(anova_mdl5$df),
+  AIC = round(as.numeric(anova_mdl5$AIC)),
+  BIC = round(as.numeric(anova_mdl5$BIC)),
+  LogLik = round(as.numeric(anova_mdl5$logLik)),
+  LRT_Stat = c("--", round(anova_mdl5$L.Ratio[2], 2)),
+  p_value = anova_mdl5$`p-value`[2])
+
+```
+
+```{r create table6, include = FALSE}
+
+# caption_table <- "Table 6: Model 5 has a random intercept for person, and a nested random intercept for sensor. Removing the random intercept for person from Model 5 (resulting in a model that only has a random intercept for sensor) significantly decreases the AIC and BIC, even though person does not have a large ICC in model 5. Note models were fit using Restricted Maximum Likelihood (REML), as fixed effects are the same between models."
+
+
+# col_labels <- c("Model Version", 
+#                 "\\shortstack{Degrees of\\\\Freedom}", 
+#                 "AIC", 
+#                 "BIC", 
+#                 "Log-Likelihood", 
+#                 "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+#                 "P-Value")
+
+# kable(anova_mdl5_clean, 
+#       format="latex",
+#       col.names = col_labels,
+#       align = "lrrrrrr",
+#       booktabs = TRUE,#, #right aligns numbers
+#       escape = FALSE) %>% 
+#     #   caption = caption_table) %>%
+#     kable_styling(latex_options = "scale_down", 
+#                 full_width = FALSE) %>%
+#     add_header_above(c("Table 5: Likelihood Ratio Test for Random Intercept for Person" = 7), 
+#                    bold = TRUE, align = "l") %>%
+#     row_spec(0, bold = TRUE) %>% #highlight main row
+#     footnote(
+#            # The caption will wrap inside this box and NOT shrink the table.
+#            general = paste0("\\\\begin{minipage}{20cm}\\\\vspace{2mm}\\\\footnotesize{", caption_table, "}\\\\end{minipage}"),
+#            general_title = "", 
+#            threeparttable = TRUE, 
+#            escape = FALSE)
+```
+
+
+## Random Slopes
+
+The current model has random intercepts for person and sensor (nested), implying that measurements from the same sensor are correlated, and sensors belonging to the same person are correlated. However, it assumes that the impact of temperature (the day variable) is identical for all individuals. We tested day as a random slope (given person) to determine if the effect of day varies by person, meaning some people adapt to the temperature environment differently than others.
+
+```{r add random slope}
+#mdl 4c is model 5
+
+mdl6_reml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type,
+  random = list(
+    person = ~ 1 + day,
+    HF_type = ~ 1
+  ), 
+  data = data_clean, 
+  method = "REML"
+)
+
+print(anova(mdl4c_reml, mdl6_reml))
+
+print(VarCorr(mdl6_reml))
+
+mdl6_var <- as.numeric(VarCorr(mdl6_reml))
+print(mdl6_var)
+
+#these are the variances
+print(mdl6_var[1])
+print(mdl6_var[2])
+print(mdl6_var[3])
+print(mdl6_var[4])
+print(mdl6_var[5])
+print(mdl6_var[6])
+print(mdl6_var[15]) #correlation
+
+
+mdl6_var_person <- mdl6_var[2]
+mdl6_var_day <- mdl6_var[3]
+mdl6_var_sensor <- mdl6_var[5]
+mdl6_var_residual <- mdl6_var[6]
+mdl6_var_total <- mdl6_var_person + mdl6_var_sensor + mdl6_var_day+ mdl6_var_residual
+
+mdl6_icc_person <- round(mdl6_var_person / mdl6_var_total, 4)
+mdl6_icc_sensor <- round(mdl6_var_sensor / mdl6_var_total, 4)
+mdl6_icc_day <- round(mdl6_var_day / mdl6_var_total, 4)
+mdl6_icc_res <- round(mdl6_var_residual / mdl6_var_total, 4)
+
+mdl6_corr_day_person <- mdl6_var[15]
+
+print("icc person mdl6")
+print(mdl6_icc_person)
+
+print("icc day mdl6")
+print(mdl6_icc_day)
+
+print("icc sensor mdl6")
+print(mdl6_icc_sensor)
+
+print("icc residual mdl6")
+print(mdl6_icc_res)
+
+print("icc person mdl4c")
+print(mdl4c_icc_person)
+
+print("icc sensor mdl4c")
+print(mdl4c_icc_sensor)
+
+print("icc residual mdl4c")
+print(mdl4c_icc_res)
+
+
+print("corr day person")
+print(mdl6_corr_day_person)
+```
+
+```{r anova mdl6 rs}
+
+anova_mdl6 <- anova(mdl4c_reml, mdl6_reml)
+anova_mdl6_clean <- data.frame(
+  Model = c("Model 5: Random Intercept: Person and Nested Sensor", 
+            "Model 6: Add Random Slope for Day (Given Person)"),
+  Df = as.numeric(anova_mdl6$df),
+  AIC = round(as.numeric(anova_mdl6$AIC)),
+  BIC = round(as.numeric(anova_mdl6$BIC)),
+  LogLik = round(as.numeric(anova_mdl6$logLik)),
+  LRT_Stat = c(NA, round(anova_mdl6$L.Ratio[2], 2)),
+  # FIX: Pass a vector of TWO values instead of just one
+  p_value = c(NA, anova_mdl6$`p-value`[2]) 
+)
+
+print(anova_mdl6)
+
+anova_mdl6_clean <- anova_mdl6_clean %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+```
+
+```{r create-table-randomslope, include = TRUE}
+
+
+
+kable(anova_mdl6_clean, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Likelihood test between Model 5 and Model 6, which adds day as a random slope. Model 6 has significantly lower AIC and BIC, and a very small p-value, so it is statistically significant. Note that models are run using REML, as the have the same fixed effects.}") %>%
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Likelihood Ratio Test for Random Slope for day" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE)
+```
+
+Adding day as a random slope (Model 6) results in 45% unexplained variance, compared to 60% from Model 5. The ICC for day is 0.186, which is fairly large; ~19% of the variation in heat flow measurements is explained by the fact that people have different heat flow reactions depending on the external temperature. Additionally, the correlation between the person-level intercept and the day-level random slope is -0.884. This implies that the higher a person's heat flow was on day 1 (hot day), the steeper their drop was on day 2 (cold day), suggesting convergence.
+
+The ICC for person also increased to 0.0419 (compared to 0.0184 from model 5), suggesting that the noise from people reacting differently to temperature masked their baseline differences. The ICC for sensor decreased to 0.3241 (from 0.3772 in model 5), suggesting that temperature explained some of the heat flow variance that was previously attributed to sensor.
+
+Additionally as shown in Table \@ref(tab:create-table-randomslope), Model 6 has better AIC and BIC than Model 5, so we included day as a random slope.
+
+## Covariance Structures
+
+
+
+```{r AR1 model}
+mdl7_reml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  data = data_clean, 
+  method = "REML"
+)
+print(summary(mdl7_reml))
+```
+
+```{r anova mdl7}
+
+
+anova_mdl7 <- anova(mdl6_reml, mdl7_reml)
+anova_mdl7_clean <- data.frame(
+  Model = c("Model 6: Assumes Compound Symmetry", "Model 7: Assumes Auto-regressive AR(1)"),
+  Df = as.numeric(anova_mdl7$df),
+  AIC = round(as.numeric(anova_mdl7$AIC)),
+  BIC = round(as.numeric(anova_mdl7$BIC)),
+  LogLik = round(as.numeric(anova_mdl7$logLik)),
+  LRT_Stat = c(NA, round(anova_mdl7$L.Ratio[2], 2)),
+  p_value = c(NA,anova_mdl7$`p-value`[2]))
+
+print(anova_mdl7)
+
+anova_mdl7_clean <- anova_mdl7_clean %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+```
+
+```{r create-table-mdl6-mdl7, include = TRUE}
+
+
+kable(anova_mdl7_clean, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Likelihood test between Model 6 and Model 7, testing an AR1 structure where magnitude of correlation depends on amount of time between observations (instead of flat correlation). Model 7 has significantly lower AIC and BIC and a very small p-value, so it is statistically significant. Note that models are run using REML, as they have the same fixed effects.}") %>% 
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Likelihood Ratio Test for Covariance Structures" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE)
+```
+
+
+
+```{r AR1 model v2}
+mdl7b_reml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day/activity), 
+  data = data_clean, 
+  method = "REML"
+)
+print(summary(mdl7b_reml))
+```
+
+```{r anova mdl7b}
+
+
+anova_mdl7b <- anova(mdl7_reml, mdl7b_reml)
+# anova_mdl7b_clean <- data.frame(
+#   Model = c("Model 6: Assumes Compound Symmetry", "Model 7: Assumes Auto-regressive AR(1)"),
+#   Df = as.numeric(anova_mdl7b$df),
+#   AIC = round(as.numeric(anova_mdl7b$AIC)),
+#   BIC = round(as.numeric(anova_mdl7b$BIC)),
+#   LogLik = round(as.numeric(anova_mdl7b$logLik)),
+#   LRT_Stat = c("--", round(anova_mdl7b$L.Ratio[2], 2)),
+#   p_value = anova_mdl7$`p-value`[2])
+
+print(anova_mdl7b)
+```
+
+
+The selected hierarchical structure (Model 6) effectively partitions the data's variance into three distinct components: global participant-level baselines, individual thermal adaptation patterns (represented by the random slope for day), and nested sensor-level deviations. This framework accounts for the inherent dependencies in the data while acknowledging that heat flow sensitivity is not uniform across the study population. 
+
+However, this still imposes a strict assumption of conditional independence for the remaining residual errors. It has a compound symmetry structure, assuming a constant correlation structure where the correlation between session 1 and session 2 is identical to the correlation between session 1 and session 4, ignoring the fact that observations closer in time are typically more highly correlated. As such, we examined implementing an autoregressive (AR1) correlation structure for the residuals in Model 7. We assumed this was nested within person, sensor, and day, ensuring independence between people, sensor location, and days. We did not assume independence between activity because the activities were done in order, with session 1 consisting of sitting, then standing, then walking, then a break, and then session two beginning with the same cycle (although sessions 2 and 4 did not have walking). This assumes that these measurements were equally spaced in time, which is likely not true - timestamp data could improve this assumption.
+
+The correlation structure has a $\phi$ of 0.5745, meaning that the correlation between sesson 1 and 2 is ~0.57, and session 1 & 3 is ~$0.57^2$. This is fairly high, suggesting the previous data point strongly influences the next one. Since we have the data segmented by session and activity, it suggests that sitting in session 1 impacts standing in session 1, and walking in session 1 impacts sitting in session 2. Additionally, Table \@ref(tab:create-table-mdl6-mdl7) shows that Model 7 has significantly lower AIC and BIC, and is statistically significant in the likelihood ratio test against Model 6, suggesting an AR1 covariance structure is a significant improvement on the Compound Symmetry structure, and that there is a strong temporal auto-correlation.
+
+
+```{r ARH(1)}
+mdl8_reml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "REML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+summary(mdl8_reml)
+```
+
+```{r}
+anova_mdl8 <- anova(mdl7_reml, mdl8_reml)
+print(anova_mdl8)
+```
+
+```{r create-table-mdl7-mdl8, include = TRUE}
+
+
+anova_mdl8_clean <- data.frame(
+  Model = c("Model 7: Assumes Auto-regressive Structure (AR(1))", "Model 8: Assumes Heterogenuous AR Structure (ARH(1))"),
+  Df = as.numeric(anova_mdl8$df),
+  AIC = round(as.numeric(anova_mdl8$AIC)),
+  BIC = round(as.numeric(anova_mdl8$BIC)),
+  LogLik = round(as.numeric(anova_mdl8$logLik)),
+  LRT_Stat = c(NA, round(anova_mdl8$L.Ratio[2], 2)),
+  p_value = c(NA,anova_mdl8$`p-value`[2]))
+
+
+anova_mdl8_clean <- anova_mdl8_clean %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+kable(anova_mdl8_clean, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Likelihood test between Model 7 and Model 8, testing an ARH1 structure that allows each sensor to have its own unique residual variance instead of assuming uniform residual noise. Model 8 has significantly lower AIC and BIC and a very small p-value, so it is statistically significant. Note that models are run using REML, as they have the same fixed effects.}") %>% 
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Likelihood Ratio Test for Covariance Structures" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE)
+```
+
+Model 7 (AR(1)) showed that there is a temporal aspect to the data, where consecutive sessions are more closely linked than further ones. However, AR(1) assumes that the amount of variance is identical for all sensors. However, we would expect sensors on different body parts to have different variance. As such, we tested a heterogeneous AR structure ARH(1) by combining Model 7's AR(1) structure with heterogeneous residual variances across sensors. 
+
+Model 8's $\phi$ is 0.6269, higher than Model 7's (0.5745), suggesting the temporal aspect of the data was higher than previously suggested and was masked by the noise levels of the sensors. The estimates for the heterogenuous variances relative to sensor 16 (baseline, dominant hand) are: 1.27 (sensor 2, chest (side)), 0.72 (sensor 3, upper chest), 0.35 (sensor 5, upper arm), 0.95 (sensor 7, lower arm), and 0.97 (sensor 8, abdomen). This implies that sensors on the abdomen, lower arm, and dominant hand have similar noise. The sensor on the chest (side) is significantly noisier than those sensors, and the sensors on the upper chest and arm are significantly less noisy. There does not seem to be an obvious trend or reason for this; it may be helpful to consult experts in the field. Additionally, Table \@ref(tab:create-table-mdl7-mdl8) shows that the ARH(1) structure (Model 8) has significantly lower AIC and BIC than Model 7's AR(1) structure, and is statistically significant in the likelihood ratio test.
+
+
+```{r ARH(1) v2}
+mdl8b_reml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day/activity), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "REML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+anova(mdl8_reml, mdl8b_reml)
+```
+
+## Pruning Fixed Effects 
+
+The final model utilizes an ARH(1) covariance structure to account for the temporal aspect of the data between sequential activities and sessions, while allowing for unique levels of noise at each sensor. Additionally, it has random intercepts for individuals and nested sensors to account for sensor-specific baselines per individual, and a person-level random slope for day to capture individual level responses to temperature changes. The model has become quite complex, so we re-examine fixed effects to determine if there are any that can be removed.
+
+```{r prune_v1}
+mdl8_ml <- lme(
+  fixed = log(HF_value) ~ (day + session + activity + sex) * HF_type, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+```
+
+```{r 9a}
+
+mdl9a_ml_no_interact_sensor_sex <- lme(
+  fixed = log(HF_value) ~ (day + session + activity) * HF_type + sex, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+mdl9a2_ml_no_sex <- lme(
+  fixed = log(HF_value) ~ (day + session + activity) * HF_type , 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+```
+
+```{r 9b}
+mdl9b_ml_no_interact_sensor_day <- lme(
+  fixed = log(HF_value) ~ (sex + session + activity) * HF_type + day, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+mdl9b2_ml_no_day <- lme(
+  fixed = log(HF_value) ~ (sex + session + activity) * HF_type , 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+```
+
+```{r 9c}
+mdl9c_ml_no_interact_sensor_activity <- lme(
+  fixed = log(HF_value) ~ (day + session + sex) * HF_type + activity, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+mdl9c2_ml_no_activity <- lme(
+  fixed = log(HF_value) ~ (day + session + sex) * HF_type , 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+```
+
+```{r 9d}
+mdl9d_ml_no_interact_sensor_session <- lme(
+  fixed = log(HF_value) ~ (day + activity + sex) * HF_type + session, 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+mdl9d2_ml_no_session <- lme(
+  fixed = log(HF_value) ~ (day + activity + sex) * HF_type , 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "ML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+```
+
+
+```{r}
+anova(mdl8_ml, mdl9a_ml_no_interact_sensor_sex)
+#not statistically significant, higher BIC and AIC if include --> remove
+```
+
+```{r}
+anova(mdl8_ml, mdl9a2_ml_no_sex)
+#not statistically significant, higher BIC and AIC if include --> remove
+
+```
+
+```{r}
+anova(mdl8_ml, mdl9b_ml_no_interact_sensor_day)
+#lower AIC and BIC if include, and p-val <0.0001 --> include
+```
+
+```{r}
+anova(mdl8_ml, mdl9b2_ml_no_day)
+#lower AIC and BIC if include, and p-val <0.0001 --> include
+```
+
+```{r}
+anova(mdl8_ml, mdl9c_ml_no_interact_sensor_activity)
+#lower AIC and BIC if include, and p-val <0.0001 --> include
+
+```
+
+```{r}
+anova(mdl8_ml, mdl9c2_ml_no_activity)
+#lower AIC and BIC if include, and p-val <0.0001 --> include
+
+```
+
+```{r}
+anova(mdl8_ml, mdl9d_ml_no_interact_sensor_session)
+#BIC worsens (increases) significant if include, but AIC decreases slightly. p-value is 0.0021, stat significant but not crazy. --> remove
+
+```
+
+```{r}
+anova(mdl8_ml, mdl9d2_ml_no_session)
+#BIC worsens (increases) significant if include, but AIC decreases slightly (2 points). p-value is 0.0034, stat significant but not crazy. --> remove
+
+```
+
+```{r}
+
+anova_summary_manual_mdl8 <- bind_rows(
+  get_baseline_metrics(mdl8_ml, "Model 8 (Full Model)"),
+  get_anova_outputs(mdl8_ml, mdl9a_ml_no_interact_sensor_sex, "Drop Sensor and Sex Interaction"),
+  get_anova_outputs(mdl8_ml, mdl9a2_ml_no_sex, "Drop Sex Fully"),
+  get_anova_outputs(mdl8_ml, mdl9b_ml_no_interact_sensor_day, "Drop Sensor and Day Interaction"),
+  get_anova_outputs(mdl8_ml, mdl9b2_ml_no_day, "Drop Day Fully"),
+  get_anova_outputs(mdl8_ml, mdl9c_ml_no_interact_sensor_activity, "Drop Sensor and Activity Interaction"),
+  get_anova_outputs(mdl8_ml, mdl9c2_ml_no_activity, "Drop Activity Fully"),
+  get_anova_outputs(mdl8_ml, mdl9d_ml_no_interact_sensor_session, "Drop Sensor and Session Interaction"),
+  get_anova_outputs(mdl8_ml, mdl9d2_ml_no_session, "Drop Session Fully"),
+)
+
+print(anova_summary_manual_mdl8)
+
+anova_summary_manual_mdl8_clean <- anova_summary_manual_mdl8 %>%
+  mutate(
+    LRT_Stat = ifelse(is.na(LRT_Stat), "--", as.character(LRT_Stat)),
+    p_value = ifelse(is.na(p_value), "--", 
+                     # eps defines the threshold for "<" 
+                     # digits defines the rounding for values above that threshold
+                     format.pval(p_value, eps = 0.0001, digits = 4))
+  )
+```
+
+```{r}
+
+col_labels <- c("Model Version", 
+                "\\shortstack{Degrees of\\\\Freedom}", 
+                "AIC", 
+                "BIC", 
+                "Log-Likelihood", 
+                "\\shortstack{Likelihood Ratio\\\\Test Stat}", 
+                "P-Value")
+
+```
+
+
+```{r create-table-fixed-pruning-fin, include = TRUE}
+
+kable(anova_summary_manual_mdl8_clean, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Model selection of variables via backwards elimination. Model 8 includes the four interaction terms previously noted. Each subsequent row represents a model where either only one interaction term was dropped from Model 8 (Drop X and Y Interaction), or the whole variable and interaction (Drop Sex Fully means dropped the variable sex, and the interaction term sex and sensor). The LRT Statistic and P-Value are derived from Likelihood Ratio Tests comparing the reduced models to Model 8. Note all models were fit using Maximum Likelihood (ML), to compare across models.}") %>% 
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Backwards Selection of Interaction Terms and Variables: Likelihood Ratio Test Summary" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE) %>% #highlight main row
+    row_spec(1, italic = TRUE) 
+```
+
+
+Table \@ref(tab:create-table-fixed-pruning-fin) suggests that we should remove the variables Sex and the interaction term of Sensor and Sex, as the model without those terms has better AIC and BIC, and the p-value from the likelihood ratio test is not statistically significant (>0.4). We also removed the variable Session and the interaction term of Sensor and Session. Although they minimall improve the AIC (by <10 points), they worsen the BIC significantly and introduce ~18 degrees of freedom. 
+
+The final model is Model 9: ($\log(\text{HF\_value}) \sim \text{activity + day + sensor +  sensor * activity + sensor * day}$), which evaluates the fixed effects of activity, day, sensor, and the interactions of sensor with activity and day. It addresses the hierarchical nature of the data by incorporating a random intercept for person, a nested random intercept for sensor, and a person-level random slope for day. Finally, the error structure is defined by an ARH(1) covariance structure, allowing temporal auto-correlation segmented by person, sensor, and day, and heterogenous residual variances to account for different levels of volatility across sensors.
+
+```{r run model 9 final results, include = TRUE}
+mdl_9_fin <- lme(
+  fixed = log(HF_value) ~ (day + activity + sex) * HF_type , 
+  random = list(
+    person = ~ 1 + day,  
+    HF_type = ~ 1        
+  ), 
+  correlation = corAR1(form = ~ 1 | person/HF_type/day), 
+  weights = varIdent(form = ~ 1 | HF_type),
+  data = data_clean, 
+  method = "REML",
+  control = lmeControl(msMaxIter = 200) #basically, increase iterations
+)
+
+summary(mdl_9_fin)
+```
+
+
+# Discussion: Answer the questions
+
+- Motivate the use of mixed linear models in this project and build one to assess
+  - the inter-variability in heat flow,
+    - ??
+  - the intra-variability in heat flow, and
+    - ??
+  - the covariance structure between the sensors
+    - ??
+
+- Allow for different levels of grouping: allow observations for the same participant to be correlated, and observations within the same participant and the same activity to be correlated too. Check whether this is needed by looking at the proportion of variance explained by your different levels
+  - Person yes (prev discussed in ICC)
+  - Activity no (prev discussed in ICC)
+  - Sensor yes (prev discussed)
+
+- The context of the experiment is multivariate by nature. How will you use the univariate mixed model to model marginal and joint measurements from the different sensors?
+
+- Provide interpretation of the most important parameters of your final model
+
+- Aim of the study: Is there significant inter- and intra-individual variability in heat flow measurements in each of the sensors? How are measurements from different sensors related?
+
+- To examine the intra-individual variability, it is necessary to analyze for the
+same person
+  - Effect of the time: The difference between the same activities on the same day, but at different times (sessions)
+  - Temperature effect: The difference between the same activities but on different days
+
+- To examine the inter-individual variability, it is necessary to examine the difference between the same activities on the same day, but across participants
+
+
+## Appendix
+
+
+```{r fixed-effects-table, include = TRUE}
+kable(anova_summary_manual_mdl1_cleaned, 
+      format="latex",
+      col.names = col_labels,
+      align = "lrrrrrr",
+      booktabs = TRUE,#, #right aligns numbers
+      escape = FALSE,
+      caption = "\\footnotesize{Model selection of fixed effects via backwards elimination. Model 1 (the 'Full Model') includes all predictors. Each subsequent row represents a model where only one term was dropped from Model 1. The LRT Statistic and P-Value are derived from Likelihood Ratio Tests comparing the reduced model to Model 1. Note all models were fit using Maximum Likelihood (ML), to compare across models.}") %>%
+    kable_styling(latex_options = c("scale_down","hold_position"), 
+                full_width = FALSE,
+                table.envir = "table") %>%
+    add_header_above(c("Backwards Selection of Fixed Effects: Likelihood Ratio Test Summary" = 7), 
+                   bold = TRUE, align = "l") %>%
+    row_spec(0, bold = TRUE) %>% #highlight main row
+    row_spec(1, italic = TRUE)
+```
+
