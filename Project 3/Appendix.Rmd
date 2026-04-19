@@ -1,0 +1,109 @@
+---
+title: "Appendix B: Causal discovery as a method to determine Average Causal Effect of Payment Protection Plans on Default"
+author: "Zhuo Diao, Nikita Gupta"
+date: "**April 3, 2026**"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: no
+always_allow_html: true
+urlcolor: blue
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+# Appendix B: Markov Blankest and DAGs
+
+## ($\alpha$ = 5%)
+
+```{r full-dag-pc-full, echo=FALSE, fig.cap="Full DAG for the PC with all covariates model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/causal_dag_pc_method_fullcov.png")
+```
+
+```{r consensus-dag-pc-full, echo=FALSE, fig.cap="Consensus DAG (edges included if they are in over 50% of the bootstraps) for the PC with all covariates model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/consensus_dag_pc_bootstrap_full.png")
+```
+
+```{r full-dag-pc-limited-cov, echo=FALSE, fig.cap="Full DAG for the PC with limited covariates model.", out.width="50%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/causal_dag_pc_method_bnlearn_limitedcov.png")
+```
+
+```{r full-dag-rank-pc, echo=FALSE, fig.cap="Full DAG for the Rank PC model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/causal_dag_rank_pc_method.png")
+```
+```{r local-discovery-markov-blanket-y-boostrapped, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for Y", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_y_local_discovery.png")
+```
+```{r local-discovery-markov-blanket-a-boostrapped, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for A", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_a_local_discovery.png")
+```
+
+```{r rank-pc-markov-blanket-y-boostrapped, echo=FALSE, fig.cap="Rank PC: Bootstrapped Markov Blanket for Y", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_y_rank_pc.png")
+```
+```{r rank-pc-markov-blanket-a-boostrapped, echo=FALSE, fig.cap="Rank PC: Bootstrapped Markov Blanket for A", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_a_rank_pc.png")
+```
+
+```{r pc-limited-covs-markov-blanket-y-boostrapped, echo=FALSE, fig.cap="PC Limited Covariates: Bootstrapped Markov Blanket for Y", out.width="25%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_y_pc_limitedcovs.png")
+```
+```{r pc-limited-covs-markov-blanket-a-boostrapped, echo=FALSE, fig.cap="PC Limited Covariates: Bootstrapped Markov Blanket for A", out.width="50%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_a_pc_limitedcovs.png")
+```
+
+```{r pc-all-markov-blanket-y-boostrapped, echo=FALSE, fig.cap="PC All Covariates: Bootstrapped Markov Blanket for Y", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_y_pc_allcovs.png")
+```
+```{r pc-all-markov-blanket-a-boostrapped, echo=FALSE, fig.cap="PC All Covariates: Bootstrapped Markov Blanket for A", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/markov_blanket_boostrapped_a_pc_allcovs.png")
+```
+
+
+
+## ($\alpha$ = 1%)
+
+```{r full-dag-pc-full-01, echo=FALSE, fig.cap="Full DAG for the PC with all covariates model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_pc_method_fullcov.png")
+```
+
+```{r full-dag-pc-limited-cov-01, echo=FALSE, fig.cap="Full DAG for the PC with limited covariates model.", out.width="50%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_pc_method_bnlearn_limitedcov.png")
+```
+
+```{r full-dag-rank-pc-01, echo=FALSE, fig.cap="Full DAG for the Rank PC model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_rank_pc_method.png")
+```
+
+```{r local-discovery-markov-blanket-y-boostrapped-01, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for Y", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/markov_blanket_boostrapped_y_local_discovery.png")
+```
+```{r local-discovery-markov-blanket-a-boostrapped-01, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for A", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/markov_blanket_boostrapped_a_local_discovery.png")
+```
+
+
+## ($\alpha$ = 10%)
+
+```{r full-dag-pc-full-10, echo=FALSE, fig.cap="Full DAG for the PC with all covariates model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_pc_method_fullcov.png")
+```
+
+```{r full-dag-pc-limited-cov-10, echo=FALSE, fig.cap="Full DAG for the PC with limited covariates model.", out.width="50%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_pc_method_bnlearn_limitedcov.png")
+```
+
+```{r full-dag-rank-pc-10, echo=FALSE, fig.cap="Full DAG for the Rank PC model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_01/causal_dag_rank_pc_method.png")
+```
+```{r local-discovery-markov-blanket-y-boostrapped-10, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for Y", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_10/markov_blanket_boostrapped_y_local_discovery.png")
+```
+```{r local-discovery-markov-blanket-a-boostrapped-10, echo=FALSE, fig.cap="Local Discovery (Inter-IAMB, Ranked Data): Bootstrapped Markov Blanket for A", out.width="75%", fig.align='center'}
+knitr::include_graphics("ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V6_10/markov_blanket_boostrapped_a_local_discovery.png")
+```
+

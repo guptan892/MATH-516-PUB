@@ -1,0 +1,234 @@
+---
+title: "plot for eda"
+output: html_document
+---
+
+
+```{r load data, warning=FALSE, message=FALSE}
+#check data type and missing value
+library(tidyverse)
+data <- read.csv("low2076upd.csv")
+#colSums(is.na(data))
+#head(data)
+```
+
+```{r}
+categorical_vars <- c("Y", "A", "SEX", "EDUCATION", 
+                      paste0("PAY_", c(0, 2:6)))
+
+data <- data %>% mutate(across(all_of(categorical_vars), as.factor))
+```
+
+
+
+```{r}
+#Categorical (PAY_0 to PAY_6)
+data %>%
+  select(starts_with("PAY_") & !starts_with("PAY_AMT")) %>%
+  pivot_longer(cols = everything(), names_to = "Month", values_to = "Status") %>%
+  ggplot(aes(x = Status)) +
+  geom_bar(fill = "orange") +
+  facet_wrap(~ Month) +
+  theme_minimal() +
+  labs(title = "Distribution of Payment Status Indicators over 6 Months",
+       x = "Payment Status",
+       y = "Count")
+
+#Continuous (BILL_AMT1 to BILL_AMT6)
+data %>%
+  select(starts_with("BILL_AMT")) %>%
+  pivot_longer(cols = everything(), names_to = "Month", values_to = "Amount") %>%
+  ggplot(aes(x = Amount)) +
+  geom_histogram(bins = 30, fill = "red", color = "white") +
+  facet_wrap(~ Month, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distributions of Monthly Bill Amounts",
+       x = "Bill Amount",
+       y = "Frequency")
+
+ggsave("OUTPUT_IMAGES_EDA/bill_amounts_distribution.png", width = 10, height = 8, dpi = 300)
+
+#Continuous (PAY_AMT1 to PAY_AMT6)
+data %>%
+  select(starts_with("PAY_AMT")) %>%
+  pivot_longer(cols = everything(), names_to = "Month", values_to = "Amount") %>%
+  ggplot(aes(x = Amount)) +
+  geom_histogram(bins = 30, fill = "green", color = "white") +
+  facet_wrap(~ Month, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distributions of Monthly Payment Amounts",
+       x = "Payment Amount",
+       y = "Frequency")
+
+ggsave("OUTPUT_IMAGES_EDA/payment_amounts_distribution.png", width = 10, height = 8, dpi = 300)
+```
+
+
+```{r}
+library(scales)
+# 2&3.
+# Continuous Covariates vs Treatment (A) and Outcome (Y) 
+continuous_vars <- data %>%
+  select(A, Y, AGE, LIMIT_BAL, starts_with("BILL"), starts_with("PAY_A"))
+
+continuous_long <- continuous_vars %>%
+  pivot_longer(cols = -c(A, Y), names_to = "Variable", values_to = "Value")
+
+#Do continuous variables predict Treatment Enrollment (L -> A)?
+p_cont_A <- ggplot(continuous_long, aes(x = A, y = Value, fill = A)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
+  theme_minimal() +
+  labs(title = "Continuous Covariates by PPP Enrollment (A)",
+       x = "PPP Enrollment (A)", y = "Value") +
+  theme(legend.position = "none")
+
+# log here just for better visualization
+p_cont_A_log <- ggplot(continuous_long, aes(x = factor(A), y = Value, fill = factor(A))) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
+  scale_y_continuous(
+    trans = "pseudo_log",
+    # 1. Reduce the number of labels
+    n.breaks = 2, 
+    # 2. Use short labels (K for thousands, M for millions)
+    labels = label_number(scale_cut = cut_short_scale()) 
+  ) +
+  theme_minimal() +
+  # 3. Shrink the font size slightly for better fit
+  theme(
+    axis.text.y = element_text(size = 8),
+    legend.position = "none"
+  ) +
+  labs(title = "Continuous Covariates by Enrollment (A)",
+       subtitle = "(Log-Scaled for better visualization)",
+       x = "PPP Enrollment (A)", y = "Value (Log Scale)")
+
+print(p_cont_A_log)
+
+ggsave("OUTPUT_IMAGES_EDA/continuous_by_treatment_log.png", 
+       plot = p_cont_A_log, 
+       width = 12, 
+       height = 10, 
+       dpi = 300)
+
+#Do continuous variables predict Default (L -> Y)?
+p_cont_Y_log <- ggplot(continuous_long, aes(x = factor(Y), y = Value, fill = factor(Y))) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
+  scale_y_continuous(
+    trans = "pseudo_log",
+    n.breaks = 2, 
+    labels = label_number(scale_cut = cut_short_scale()) 
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    legend.position = "none"
+  ) +
+  labs(title = "Continuous Covariates by Default Status (Y)",
+       subtitle = "(Log-Scaled for better visualization)",
+       x = "Default Status (Y)", y = "Value (Log Scale)")
+
+print(p_cont_Y_log)
+
+ggsave("OUTPUT_IMAGES_EDA/continuous_by_default_log.png", 
+       plot = p_cont_Y_log, 
+       width = 12, 
+       height = 10, 
+       dpi = 300)
+
+```
+
+
+```{r}
+# Categorical Covariates vs Treatment (A) and Outcome (Y)
+
+categorical_vars <- data %>%
+  select(A, Y, SEX, EDUCATION, starts_with("PAY_") & !starts_with("PAY_AMT"))
+
+categorical_long <- categorical_vars %>%
+  pivot_longer(cols = -c(A, Y), names_to = "Variable", values_to = "Category") 
+
+#Do categorical variables predict Treatment Enrollment (L -> A)?
+p_cat_A <- ggplot(categorical_long, aes(x = Category, fill = A)) +
+  geom_bar(position = "fill") + # show proportions 
+  facet_wrap(~ Variable, scales = "free_x", ncol = 3) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of PPP Enrollment (A) across Categorical Covariates",
+       x = "Covariate Category", y = "Proportion of Enrollment")
+
+print(p_cat_A)
+
+ggsave("OUTPUT_IMAGES_EDA/categorical_by_treatment_proportions.png", 
+       plot = p_cat_A, 
+       width = 14, 
+       height = 10, 
+       dpi = 300)
+
+#Do categorical variables predict Default (L -> Y)?
+p_cat_Y <- ggplot(categorical_long, aes(x = Category, fill = Y)) +
+  geom_bar(position = "fill") +
+  facet_wrap(~ Variable, scales = "free_x", ncol = 3) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Default (Y) across Categorical Covariates",
+       x = "Covariate Category", y = "Proportion Defaulting")
+
+print(p_cat_Y)
+
+ggsave("OUTPUT_IMAGES_EDA/categorical_by_default_proportions.png", 
+       plot = p_cat_Y, 
+       width = 14, 
+       height = 10, 
+       dpi = 300)
+```
+
+## Collinearity and Correlation Checks
+
+```{r}
+library(corrplot)
+continuous_vars <- c("AGE", "LIMIT_BAL", 
+                               paste0("BILL_AMT", 1:6), 
+                               paste0("PAY_AMT", 1:6))
+
+#Spearman(to be robust to skewness and detect non-linear correlation)
+png(filename = "OUTPUT_IMAGES_EDA/spearman_correlation.png", 
+    width = 1000, height = 1000, res = 120)
+
+cor_matrix1 <- cor(data %>% select(all_of(continuous_vars)),
+                  method = "spearman")
+
+
+
+corrplot(cor_matrix1, 
+         method = "color", 
+         type = "upper", 
+         tl.col = "black", 
+         tl.srt = 45,
+         addCoef.col = "black", # Add correlation coefficients
+         number.cex = 0.6,      # Size of the coefficients
+         title = "Correlation of Continuous Covariates (Spearman)",
+         mar = c(0,0,1,0))
+dev.off()
+
+#Pearson
+
+png(filename = "OUTPUT_IMAGES_EDA/pearson_correlation.png", 
+    width = 1000, height = 1000, res = 120)
+
+cor_matrix2 <- cor(data %>% select(all_of(continuous_vars)),
+                  method = "pearson")
+corrplot(cor_matrix2, 
+         method = "color", 
+         type = "upper", 
+         tl.col = "black", 
+         tl.srt = 45,
+         addCoef.col = "black", # Add correlation coefficients
+         number.cex = 0.6,      # Size of the coefficients
+         title = "Correlation of Continuous Covariates (Pearson)",
+         mar = c(0,0,1,0))
+
+dev.off()
+```

@@ -1,0 +1,2270 @@
+---
+title: "TBU"
+author: "Zhuo Diao, Nikita Gupta"
+date: "**March 30, 2026**"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: no
+always_allow_html: true
+urlcolor: blue
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+
+# Set Up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "", prompt = TRUE, include = TRUE)#, cache=TRUE, autodep = TRUE)
+knitr::opts_chunk$set(fig.align="center") 
+```
+
+
+```{r}
+# Install remotes if you don't have it
+if (!require("remotes")) install.packages("remotes")
+
+# Install the micd package from the BIPS repository
+remotes::install_github("bips-hb/micd")
+
+#  Load the library
+library(micd)
+library(pcalg)
+```
+
+```{r}
+
+library(tidyverse) #installed tidyverse
+library(nlme)
+library(ggplot2)
+library(here)
+library(kableExtra)
+library(modelsummary)
+library(dplyr)
+library(performance)
+library(glmnet)
+library(pcalg)
+library(gridExtra)
+library(bnlearn)
+library(igraph)
+library(gt)
+library(gtExtras)
+library(corrplot)
+library(ggpubr)
+library(dagitty)
+
+bootstrap_sample_size <- 1000
+
+set.seed(516)
+getwd()
+```
+
+
+```{r load data}
+data <- read.csv(here("low2076upd.csv"))
+colSums(is.na(data)) #no NAs in any columns
+nrow(data) #500 rows
+colnames(data)
+```
+
+# Data manipulation
+
+```{r factorize}
+#factorize cateogorical variables
+data$Y <- as.factor(data$Y)
+data$A <- as.factor(data$A)
+data$SEX <- as.factor(data$SEX)
+data$EDUCATION <- as.factor(data$EDUCATION)
+data$PAY_0 <- as.factor(data$PAY_0)
+data$PAY_2 <- as.factor(data$PAY_2)
+data$PAY_3 <- as.factor(data$PAY_3)
+data$PAY_4 <- as.factor(data$PAY_4)
+data$PAY_5 <- as.factor(data$PAY_5)
+data$PAY_6 <- as.factor(data$PAY_6)
+```
+
+```{r}
+summary(data)
+```
+
+```{r create subset of covariates}
+#create list of ALL covariates - everything except A and Y
+cov_all <- setdiff(names(data), c("Y", "A"))
+print(cov_all)
+```
+
+```{r create enrolled and not enrolled datasets, untransformed data}
+# Create a version of the data where everyone is enrolled, and no one is enrolled, for outcome regression
+data_all_enrolled <- data
+data_all_enrolled$A <- 1
+data_all_enrolled$A <- as.factor(data_all_enrolled$A)
+
+data_no_enrolled <- data
+data_no_enrolled$A <- 0
+data_no_enrolled$A <- as.factor(data_no_enrolled$A)
+print(unique(data_all_enrolled$A)) #looks good
+print(unique(data_no_enrolled$A))
+```
+
+
+# EDA
+
+
+# 1 Now the Analysis, for all variables!
+
+
+
+# All Variables: First, untransformed data
+
+# All Variables, Outcome regression
+
+Basically, model the outcome (Y) of defaulting. 
+
+1. Train the model to understand how every variable including PPP enrollment A affects prob of defaulting Y. 
+
+2. Take all my customers (A=0 and A=1), and see what their default rate would be if they had A=1.
+
+3. Take all my customers (A=0 and A=1), and see what their default rate would be if they had A=0.
+
+4. ACE is the difference between the two.
+
+```{r outcome reg all vars}
+formula_or_all_var <- as.formula(paste("Y ~ ", paste(c(cov_all,"A"), collapse = "+"))) #now A is part of this
+model_or_all_var <- glm(formula_or_all_var, data = data, family = binomial) #binomial since 0 or 1 default
+
+print("formula")
+print(formula_or_all_var)
+
+# Predict default probability for world of everyone enrolled, and no one enrolled
+data$prob_Y_if_A1_all_var <- predict(model_or_all_var, newdata = data_all_enrolled, type = "response") #type=response gives 0-1 prob
+EY_a1_or_all_var <- mean(data$prob_Y_if_A1_all_var)
+data$prob_Y_if_A0_all_var <- predict(model_or_all_var, newdata = data_no_enrolled, type = "response")
+EY_a0_or_all_var <- mean(data$prob_Y_if_A0_all_var)
+
+ace_or_all_var <- EY_a1_or_all_var - EY_a0_or_all_var
+
+#print means
+print("Default likelihood (Full Set, OR), A=1 then A=0")
+print(EY_a1_or_all_var)
+print(EY_a0_or_all_var)
+
+print(paste("OR ACE (Full Set):", round(ace_or_all_var,4))) 
+```
+
+OR ACE for all vars is 0.2108, meaning enrolling in the PPP is associated with 21% increase in probability of missing a payment. This seems unintuitive...
+
+
+# All Variables, IPW
+Basically, we know that PPP enrollment is not split evenly between low and high risk customers. We want a way to equalize for underlying riskiness. So we calculate a propensity score to see the likelihood of a customer being enrolled in the PPP. We then look at what ACTUALLY happened (if they were enrolled, and if they charged off). We divide that by the propensity score to ensure that low population outcomes / segments are properly represented/weighted.
+
+1. 𝑃 (𝐴 = 𝑎 ∣ L) = 𝑓(L) = 𝑓(L; 𝛽): Model the probability a customer is enrolled in the PPP, given their covariates. Basically, use a logistic regression where response variable is A (PPP enrollment), and all variables except A and Y are predictors. Results in function that assigns every customer a probability of being enrolled in PPP - propensity score.
+
+2. I(A=a): indicator flagging to only look at people who actually received the treatment we're interested in. So, if A=1, only look at people who were actually enrolled.
+
+3. Y: actual missed payment status, for everyone the indicator flags.
+Overall: Someone had a 10% chance of enrolling but actually did enroll (A=1), and did NOT miss their pmt (Y=0): denominator is 0.1, while numerator is 1. So now their missed payment status is 10x the average person in terms of weight.
+
+```{r IPW all var calc ps}
+#get propensity scores
+formula_ps_all_var <- as.formula(paste("A~", paste(cov_all, collapse = "+"))) #formula of A~all covariates
+model_ps_all_var <- glm(formula_ps_all_var, data = data, family = binomial) #binomial because only 2 outcomes
+
+print("formula")
+print(formula_ps_all_var)
+
+data$ps_all_var <- predict(model_ps_all_var, type = "response") #calculate propensity scores for all customers; response transforms to probabilities.
+print("min and max ps")
+print(min(data$ps_all_var)) #.199515e-08
+print(max(data$ps_all_var)) #1
+#extreme ps means likely have extreme scores
+
+data$ps_all_var_clamped <- pmax(pmin(data$ps_all_var, 0.9999), 0.0001) #clamped ps; if 0 or 1 then model has divide by 0 issues potentially - more apparent in bootstrapping. this is a sign of too many variables.
+
+
+# calculate weights.
+data$weights_all_var <- ifelse(data[["A"]] == 1, 1 / data$ps_all_var_clamped, 1 / (1 - data$ps_all_var_clamped)) 
+print("min and max weights")
+print(min(data$weights_all_var))
+print(max(data$weights_all_var))
+#if customer was actually enrolled (A==1), then d weight as 1/ps, otherwise do 1/(1-ps)
+#So if customer had A=1 & ps=0.8, then weight = 1.25; but if A=0 then weight=5. Scales by unexpectedness of actual event.
+
+# Estimate ACE using the weighted average
+#filter to only people who were enrolled A=1 or A=0
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+# Filter to A0 or A1 groups, get default and multiply by weight; basically, if paid on time, contributes nothing to numerator. numerator = total # of defaults, denominator = total # of people (or sum of weights here)
+EY_a0_ipw_all_var <- sum(as.numeric(as.character(a0_group$Y)) * a0_group$weights_all_var)/sum(a0_group$weights_all_var)
+EY_a1_ipw_all_var <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_all_var)/sum(a1_group$weights_all_var)
+
+ace_ipw_all_var <- EY_a1_ipw_all_var - EY_a0_ipw_all_var
+print(paste("IPW ACE (Full Set):", round(ace_ipw_all_var,4)))
+```
+
+
+
+Soem graphs are below just to look at distribution of scores, etc. Given those graphs and the model error from bootstrapping, I had decided to clamp the propensity scores because otherwise we would potentially get a divide by 0 error.
+
+```{r}
+# Create a histogram of Propensity Scores
+hist(data$ps_all_var, 
+     breaks = 50, 
+     main = "Distribution of Propensity Scores",
+     xlab = "Propensity Score", 
+     col = "skyblue", 
+     border = "white")
+#a lot of low propensity scores
+```
+
+```{r}
+
+#Plot by Treatment Group to see "Overlap"
+ggplot(data, aes(x = ps_all_var, fill = as.factor(A))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Overlap of Propensity Scores",
+       x = "Propensity Score",
+       fill = "Enrolled (A)") +
+  theme_minimal()
+
+```
+
+```{r}
+#plot weights
+hist(data$weights_all_var, 
+     breaks = 50, 
+     main = "Distribution of weights",
+     xlab = "weights", 
+     col = "skyblue", 
+     border = "white")
+```
+
+```{r}
+ggplot(data, aes(x = weights_all_var, fill = as.factor(A))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Overlap of Weights",
+       x = "Weights",
+       fill = "Enrolled (A)") +
+  theme_minimal()
+#no real takeaway. A=1 has higher weights in general maybe?
+```
+
+```{r}
+#see how weights are distr A=1 vs A=0
+data %>%
+  group_by(A) %>%
+  summarise(
+    Count = n(),
+    Min     = min(weights_all_var, na.rm = TRUE),
+    Average = mean(weights_all_var, na.rm = TRUE),
+    Median  = median(weights_all_var, na.rm = TRUE),
+    Perc_25 = quantile(weights_all_var, 0.25, na.rm = TRUE),
+    Perc_75 = quantile(weights_all_var, 0.75, na.rm = TRUE),
+    Max     = max(weights_all_var, na.rm = TRUE),
+    na_count = sum(is.na(weights_all_var)),
+    inf_count = sum(is.infinite(weights_all_var))
+  )
+#although max weight for A=0 is bigger, overall A=1 tends to have higher weights given perc_75, median, and avg are all higher than A=0; perc_25 is similar, though.
+#no NAs or inf
+```
+
+
+
+# All Variables, bootstrap, 
+
+Bootstrap to get the bootstrap bias (unsure if important) and variance!
+
+Going forward, I will do bootstrapping so I can capture variance, etc.
+
+Note that I clamp PS scores below, and throughout the rest.
+
+```{r bootstrap start all var}
+bootstrap_results_all_var <- replicate(bootstrap_sample_size, {
+  #create bootstrap sample
+  sample_df <- data[sample(nrow(data), replace = TRUE), ]
+
+  #outcome regression
+  #run model
+  formula_or_sample_df <- as.formula(paste("Y ~ ", paste(c(cov_all,"A"), collapse = "+"))) 
+  model_or_sample_df <- glm(formula_or_sample_df, data = sample_df, family = binomial)
+
+  #create fake datasets
+  sample_df_a0 <- sample_df
+  sample_df_a0$A <- factor(0, levels = levels(sample_df$A))  
+  sample_df_a1 <- sample_df
+  sample_df_a1$A <- factor(1, levels = levels(sample_df$A)) 
+  
+  # Predict default probability for world of everyone enrolled, and no one enrolled
+  sample_df_prob_Y_if_A1 <- predict(model_or_sample_df, newdata = sample_df_a1, type = "response") 
+  EY_a1_or_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+  sample_df_prob_Y_if_A0 <- predict(model_or_sample_df, newdata = sample_df_a0, type = "response") 
+  EY_a0_or_sample_df <- mean(sample_df_prob_Y_if_A0)
+  
+  ace_or_sample_df <- EY_a1_or_sample_df - EY_a0_or_sample_df
+  
+  #IPW
+  #get propensity score
+  formula_ps_sample_df <- as.formula(paste("A~", paste(cov_all, collapse = "+")))
+  model_ps_sample_df <- glm(formula_ps_sample_df, data = sample_df, family = binomial)
+  sample_df$ps_sample_df <- predict(model_ps_sample_df, type = "response")
+  #clamp ps score between 0.0001 and 0.9999 because otherwise get warnings of fitted prob being 0 or 1 occurring
+  sample_df$ps_sample_df_clamped <- pmax(pmin(sample_df$ps_sample_df, 0.9999), 0.0001)
+  #get weights
+  sample_df$weights_sample_df <- ifelse(sample_df$A == 1, 1/sample_df$ps_sample_df_clamped, 1/(1-sample_df$ps_sample_df_clamped))
+  #divide into a0 and a1 groups
+  a0_group_sample_df <- sample_df[sample_df$A == 0, ]
+  a1_group_sample_df <- sample_df[sample_df$A == 1, ]
+  #calculate ACE
+  EY_a0_ipw_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_sample_df)/sum(a0_group_sample_df$weights_sample_df)
+  EY_a1_ipw_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_sample_df)/sum(a1_group_sample_df$weights_sample_df)
+  ace_ipw_sample_df <-  EY_a1_ipw_sample_df - EY_a0_ipw_sample_df
+  return(c(ace_or_sample_df, ace_ipw_sample_df))
+})
+```
+
+```{r}
+# print(bootstrap_results_all_var)
+```
+
+Basically, this outputs 2 rows of data ([1,], [2,]). With the 1st row being OR and 2nd being IPW method. and then 10 columns (or however many runs of columns).
+
+```{r bootstrap variance and bias for all variables}
+orig_ace_all_var <- c(ace_or_all_var, ace_ipw_all_var)
+
+# convert to dataframe
+boot_df_all_var <- as.data.frame(t(bootstrap_results_all_var))
+colnames(boot_df_all_var) <- c("Regression", "IPW")
+
+# Calculate Metrics
+metrics_all_var <- data.frame(
+  Method = c("Regression", "IPW"),
+  Original_ACE = orig_ace_all_var, # Use values from the full dataset
+  Bootstrap_ACE = c(mean(boot_df_all_var$Regression), mean(boot_df_all_var$IPW)),
+  Standard_Error = c(sd(boot_df_all_var$Regression), sd(boot_df_all_var$IPW))
+)
+
+# Calculate Bias
+metrics_all_var$Bootstrap_Bias <- metrics_all_var$Bootstrap_ACE - metrics_all_var$Original_ACE
+print(metrics_all_var)
+```
+
+This suggests that regression results in a much more stable result, although it is very unintuitive. IPW results in a much higher variance; even with this variance, it is a more intuitive answer as it still suggests a payment plan decreases default risk. Regression is probably biased by overfitting noise and thus creating bias (no proof here, just judgemental unintuitiveness), while IPW could be distorted by extreme weights (as evidenced by high standard error).
+
+
+
+
+
+# 2 Now the Analysis, for lasso-selected variables!
+
+
+
+
+# Lasso Variables, Outcome regression , not transformed
+
+```{r outcome reg lasso vars}
+#set up the data
+x_or_lasso <- model.matrix(Y ~ ., data = data[, c("Y", "A", cov_all)])[,-1] #only pull in cov_all, Y, A. Transform factorized variables into dummy-encoded variables. Uses everything pulled in as a predictor. [-1] Removes intercept automatically included by model.matrix
+y_or_lasso <- data$Y
+
+
+#fit lasso with cross-validation, get best lambda
+model_or_lasso <- cv.glmnet(x_or_lasso, y_or_lasso, family = "binomial", alpha = 1)
+best_lambda_or_lasso <- model_or_lasso$lambda.min
+print(colnames(x_or_lasso))
+
+# Predict default probability for world of everyone enrolled, and no one enrolled
+
+
+
+# create new datasets where A is overridden to be all 1s or all 0s, and then transform into model matrix format for prediction
+x_all_enrolled_or_lasso <- x_or_lasso
+x_no_enrolled_or_lasso <- x_or_lasso
+
+#if A is included, get the column number
+#searchs for A or A0/A1, but this way doesnt get AGE
+col_idx_A <- grep("^A[0-9]?$", colnames(x_or_lasso))
+#if we include A, then do:
+if(length(col_idx_A) > 0) {
+  x_all_enrolled_or_lasso[, col_idx_A] <- 1
+  x_no_enrolled_or_lasso[, col_idx_A]  <- 0
+}
+
+#now predict
+data$prob_Y_if_A1_lasso <- as.numeric(predict(model_or_lasso, s = best_lambda_or_lasso, newx = x_all_enrolled_or_lasso, type = "response"))
+EY_a1_or_lasso <- mean(data$prob_Y_if_A1_lasso)
+
+data$prob_Y_if_A0_lasso <- as.numeric(predict(model_or_lasso, s = best_lambda_or_lasso, newx = x_no_enrolled_or_lasso, type = "response"))
+EY_a0_or_lasso <- mean(data$prob_Y_if_A0_lasso)
+
+
+ace_or_lasso <- EY_a1_or_lasso - EY_a0_or_lasso
+
+print("formula")
+lasso_y_coefs <- coef(model_or_lasso, s = "lambda.min")
+lasso_y_vars <- rownames(lasso_y_coefs)[which(as.matrix(lasso_y_coefs) != 0)]
+# Remove Intercept and Treatment A to get the adjustment set
+cov_lasso_y <- setdiff(lasso_y_vars, c("(Intercept)")) #A is not removed
+formula_lasso_or_text <- paste("Y ~ ", paste(cov_lasso_y, collapse = " + "))
+formula_lasso_or_text_anotherver <- lasso_y_vars[which(lasso_y_vars != "(Intercept)")]
+print(formula_lasso_or_text)
+print(lasso_y_vars)
+
+#print means
+print("Default likelihood (Lasso, OR), A=1 then A=0")
+print(EY_a1_or_lasso)
+print(EY_a0_or_lasso)
+print(paste("OR ACE (Lasso):", round(ace_or_lasso,4)))
+```
+
+
+
+
+# Lasso Variables, IPW
+
+
+```{r IPW lasso var calc ps}
+
+
+#prepare data
+x_ps_lasso <- model.matrix(A ~ ., data = data[, c("A", cov_all)])[,-1]
+y_ps_lasso <- data$A
+
+
+#fit lasso
+model_ps_lasso <- cv.glmnet(x_ps_lasso, y_ps_lasso, family = "binomial", alpha = 1)
+best_lambda_ps_lasso <- model_ps_lasso$lambda.min
+
+
+#get propensity scores
+data$ps_lasso <- as.numeric(predict(model_ps_lasso, s = best_lambda_ps_lasso, newx = x_ps_lasso, type = "response"))
+
+
+print("min and max ps")
+print(min(data$ps_lasso))
+print(max(data$ps_lasso))
+
+
+data$ps_lasso_clamped <- pmax(pmin(data$ps_lasso, 0.9999), 0.0001)
+
+
+# calculate weights.
+data$weights_lasso <- ifelse(data[["A"]] == 1, 1 / data$ps_lasso_clamped, 1 / (1 - data$ps_lasso_clamped))
+
+
+print("min and max weights")
+print(min(data$weights_lasso))
+print(max(data$weights_lasso))
+
+
+#get formula
+print("formula")
+lasso_a_coefs <- coef(model_ps_lasso, s = "lambda.min")
+lasso_a_vars <- rownames(lasso_a_coefs)[which(as.matrix(lasso_a_coefs) != 0)]
+cov_lasso_a <- setdiff(lasso_a_vars, c("(Intercept)"))
+formula_lasso_ps_text <- paste("A ~", paste(cov_lasso_a, collapse = " + "))
+formula_lasso_ps_text_anotherver <- lasso_a_vars[which(lasso_a_vars != "(Intercept)")]
+print(formula_lasso_ps_text)
+print(cov_lasso_a)
+
+# Estimate ACE using the weighted average
+#filter to only people who were enrolled A=1 or A=0
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+# Filter to A0 or A1 groups, get default and multiply by weight
+EY_a0_ipw_lasso <- sum(as.numeric(as.character(a0_group$Y))* a0_group$weights_lasso)/sum(a0_group$weights_lasso)
+EY_a1_ipw_lasso <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_lasso)/sum(a1_group$weights_lasso)
+
+
+ace_ipw_lasso <- EY_a1_ipw_lasso - EY_a0_ipw_lasso
+print(paste("IPW ACE (Lasso):", round(ace_ipw_lasso,4)))
+```
+
+
+```{r}
+#see how weights are distr A=1 vs A=0
+data %>%
+ group_by(A) %>%
+ summarise(
+   Count = n(),
+   Min     = min(weights_lasso, na.rm = TRUE),
+   Average = mean(weights_lasso, na.rm = TRUE),
+   Median  = median(weights_lasso, na.rm = TRUE),
+   Perc_25 = quantile(weights_lasso, 0.25, na.rm = TRUE),
+   Perc_75 = quantile(weights_lasso, 0.75, na.rm = TRUE),
+   Max     = max(weights_lasso, na.rm = TRUE),
+   na_count = sum(is.na(weights_lasso)),
+   inf_count = sum(is.infinite(weights_lasso))
+ )
+#although max weight for A=0 is bigger, overall A=1 tends to have higher weights given perc_75, median, and avg are all higher than A=0; perc_25 is similar, though.
+#no NAs or inf
+```
+
+
+This shows the weights are more reasonable than the full dataset.
+
+
+
+# Lasso Variables, bootstrap
+
+
+```{r bootstrap start lasso}
+bootstrap_results_lasso <- replicate(bootstrap_sample_size, {
+ #create bootstrap sample
+ sample_df <- data[sample(nrow(data), replace = TRUE), ]
+
+ #outcome regression
+
+ x_or_lasso_sample_df <- model.matrix(Y ~ ., data = sample_df[, c("Y", "A", cov_all)])[,-1]
+ y_or_lasso_sample_df <- sample_df$Y
+
+
+ #fit lasso with cross-validation, get best lambda
+ model_or_lasso_sample_df <- cv.glmnet(x_or_lasso_sample_df, y_or_lasso_sample_df, family = "binomial", alpha = 1)
+ best_lambda_or_lasso_sample_df <- model_or_lasso_sample_df$lambda.min
+
+
+ x_all_enrolled_or_lasso_sample_df <- x_or_lasso_sample_df
+ x_no_enrolled_or_lasso_sample_df <- x_or_lasso_sample_df
+
+
+  #if A is included, get the column number
+  #searchs for A or A0/A1, but this way doesnt get AGE
+  col_idx_A_sample_df <- grep("^A[0-9]?$", colnames(x_or_lasso_sample_df))
+  #if we include A, then do:
+  if(length(col_idx_A_sample_df) > 0) {
+    x_all_enrolled_or_lasso_sample_df[, col_idx_A_sample_df] <- 1
+    x_no_enrolled_or_lasso_sample_df[, col_idx_A_sample_df]  <- 0
+  }
+
+
+ #now predict
+ sample_df_prob_Y_if_A1 <- as.numeric(predict(model_or_lasso_sample_df, s = best_lambda_or_lasso_sample_df, newx = x_all_enrolled_or_lasso_sample_df, type = "response"))
+ EY_a1_or_lasso_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+
+ sample_df_prob_Y_if_a0 <- as.numeric(predict(model_or_lasso_sample_df, s = best_lambda_or_lasso_sample_df, newx = x_no_enrolled_or_lasso_sample_df, type = "response"))
+ EY_a0_or_lasso_sample_df <- mean(sample_df_prob_Y_if_a0)
+
+
+ ace_or_lasso_sample_df <- EY_a1_or_lasso_sample_df - EY_a0_or_lasso_sample_df
+
+
+  #IPW
+
+
+ #prepare data
+ x_ps_lasso_sample_df <- model.matrix(A ~ ., data = sample_df[, c("A", cov_all)])[,-1]
+ y_ps_lasso_sample_df <- sample_df$A
+
+
+ #fit lasso
+ model_ps_lasso_sample_df <- cv.glmnet(x_ps_lasso_sample_df, y_ps_lasso_sample_df, family = "binomial", alpha = 1)
+ best_lambda_ps_lasso_sample_df <- model_ps_lasso_sample_df$lambda.min
+ #get propensity scores
+ sample_df$ps_lasso_sample_df <- as.numeric(predict(model_ps_lasso_sample_df, s = best_lambda_ps_lasso_sample_df, newx = x_ps_lasso_sample_df, type = "response"))
+
+
+ sample_df$ps_lasso_clamped_sample_df <- pmax(pmin(sample_df$ps_lasso_sample_df, 0.9999), 0.0001)
+ # calculate weights.
+ sample_df$weights_lasso_sample_df <- ifelse(sample_df[["A"]] == 1, 1 / sample_df$ps_lasso_clamped_sample_df, 1 / (1 - sample_df$ps_lasso_clamped_sample_df))
+
+
+ # Estimate ACE using the weighted average
+ #filter to only people who were enrolled A=1 or A=0
+ a0_group_sample_df <- sample_df[sample_df$A == 0, ]
+ a1_group_sample_df <- sample_df[sample_df$A == 1, ]
+ # Filter to A0 or A1 groups, get default and multiply by weight
+ EY_a0_ipw_lasso_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_lasso_sample_df)/sum(a0_group_sample_df$weights_lasso_sample_df)
+ EY_a1_ipw_lasso_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_lasso_sample_df)/sum(a1_group_sample_df$weights_lasso_sample_df)
+
+
+ ace_ipw_lasso_sample_df <-  EY_a1_ipw_lasso_sample_df - EY_a0_ipw_lasso_sample_df
+
+
+ return(c(ace_or_lasso_sample_df, ace_ipw_lasso_sample_df))
+})
+```
+
+
+```{r bootstrap variance and bias for lasso}
+orig_ace_lasso <- c(ace_or_lasso, ace_ipw_lasso)
+
+
+# convert to dataframe
+boot_df_lasso <- as.data.frame(t(bootstrap_results_lasso))
+colnames(boot_df_lasso) <- c("Regression", "IPW")
+
+
+# Calculate Metrics
+metrics_lasso <- data.frame(
+ Method = c("Regression", "IPW"),
+ Original_ACE = orig_ace_lasso, # Use values from the full dataset
+ Bootstrap_ACE = c(mean(boot_df_lasso$Regression), mean(boot_df_lasso$IPW)),
+ Standard_Error = c(sd(boot_df_lasso$Regression), sd(boot_df_lasso$IPW))
+)
+
+
+# Calculate Bias
+metrics_lasso$Bootstrap_Bias <- metrics_lasso$Bootstrap_ACE - metrics_lasso$Original_ACE
+print(metrics_lasso)
+```
+
+
+This suggests that things are more stable with the lasso.
+
+
+
+
+
+# 3 Now, do rank PC analysis!!
+
+PC requires data follow Gaussian distribution and have linear relationships - that's why we transformed the variables. The "Rank PC" method aims to make the PC algorithm robust to non-normal distributions and non-linear relationships.
+
+PC systematically tests for conditional independence between variables to determine if there should be an edge - gaussian conditional independence test, assuming variables normally distributed. 
+
+Rank PC uses rank based test, say using spearman's rank correlation (considers rank of value not raw values). Does not look at raw values - looks at rank of the value relative to others. Does not assume a specific distribution. Somewhat robust to outliers, because just ranking. On the other hand, if data is not evenly spread, could misrepresent? Because it treats gaps of 100, 101, and 102 as the same as 100, 5k, 100k. 
+
+# Non-transformed, Rank PC
+
+```{r obtain DAG rank pc}
+#convert data to numerical for gaussian tests
+rank_pc_data <- data %>%
+  mutate(across(where(is.factor), ~as.numeric(as.factor(.x)))) %>% #rank my factors into numbers
+  select(Y, A, all_of(cov_all))
+
+# calculate correlation matrix and sample size; use to test for conditional independence amongst pairs
+rank_pc_corr_size <- list(C = cor(rank_pc_data, method = "spearman"), n = nrow(rank_pc_data))
+
+# Run PC; alpha serves as a tuning parameter for the significance of independence tests
+rank_pc_fit <- pc(suffStat = rank_pc_corr_size,
+                    indepTest = gaussCItest,
+                    labels = colnames(rank_pc_data),
+                    alpha = 0.05, 
+                    verbose = FALSE)
+
+# Plot DAG
+plot(rank_pc_fit@graph, main = "Causal DAG: Rank PC Method")
+
+#export
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_rank_pc_method.png", width = 1200, height = 1000, res = 150)
+
+plot(rank_pc_fit@graph, main = "Causal DAG: Rank PC Method")
+
+# 3. Close the device to save the file
+dev.off()
+```
+
+
+```{r obtain markov blanket rank pc }
+
+rank_pc_dag <- pcalg2dagitty(as(rank_pc_fit@graph, "matrix"), 
+                       labels = colnames(rank_pc_data), 
+                       type = "cpdag")
+
+# Get the Markov Blanket (Parents + Children + Spouses)
+rank_pc_mb_y <- markovBlanket(rank_pc_dag, "Y")
+print(rank_pc_mb_y)
+
+# Update your covariate list for the models
+cov_rank_pc_y <- rank_pc_mb_y #A not longer automatically included
+print(cov_rank_pc_y) #only PAY_0?
+```
+
+```{r}
+# Get the Markov Blanket (Parents + Children + Spouses)
+rank_pc_mb_a <- markovBlanket(rank_pc_dag, "A")
+print(rank_pc_mb_a)
+
+# Update your covariate list for the models
+cov_rank_pc_a <- setdiff(rank_pc_mb_a, "Y") #exclude Y
+print(cov_rank_pc_a) #only PAY_0?
+```
+```
+
+
+# rank pc algorithm nontransformed or
+```{r run or on rank pc}
+
+#outcome regression
+if(length(cov_rank_pc_y) == 0) {
+  formula_or_rank_pc <- as.formula("Y ~ 1")
+} else {
+  formula_or_rank_pc <- as.formula(paste("Y ~ ", paste(cov_rank_pc_y, collapse = "+")))
+}
+model_or_rank_pc <- glm(formula_or_rank_pc, data = data, family = binomial)
+
+print("formula")
+print(formula_or_rank_pc)
+
+# pc_data_all_enrolled <- data_all_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# pc_data_no_enrolled <- data_no_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# Predict default probability for world of everyone enrolled, and no one enrolled
+data$prob_Y_if_A1_rank_pc_var<- predict(model_or_rank_pc, newdata = data_all_enrolled, type = "response") #type=response gives 0-1 prob
+
+EY_a1_or_rank_pc_var <- mean(data$prob_Y_if_A1_rank_pc_var)
+
+data$prob_Y_if_A0_rank_pc_var <- predict(model_or_rank_pc, newdata = data_no_enrolled, type = "response")
+EY_a0_or_rank_pc_var <- mean(data$prob_Y_if_A0_rank_pc_var)
+
+ace_or_rank_pc_var <- EY_a1_or_rank_pc_var - EY_a0_or_rank_pc_var
+
+#print means
+print("Default likelihood (Rank PC Set, OR), A=1 then A=0")
+print(EY_a1_or_rank_pc_var)
+print(EY_a0_or_rank_pc_var)
+
+print(paste("OR ACE (Rank PC Set):", round(ace_or_rank_pc_var,4))) 
+```
+
+
+# Rank PC algorithm nonttransformed ipw
+
+```{r IPW rank pc var calc ps }
+
+if(length(cov_rank_pc_a) == 0) {
+  formula_ps_rank_pc_var <- as.formula("A ~ 1")
+} else {
+  formula_ps_rank_pc_var <- as.formula(paste("A~", paste(cov_rank_pc_a, collapse = "+"))) #formula of A~pc covariates
+}
+#get propensity scores
+model_ps_rank_pc_var <- glm(formula_ps_rank_pc_var, data = data, family = binomial) #binomial because only 2 outcomes
+
+print("formula")
+print(formula_ps_rank_pc_var)
+
+data$ps_rank_pc_var <- predict(model_ps_rank_pc_var, type = "response") #calculate propensity scores for all customers; response transforms to probabilities.
+print("min and max ps")
+print(min(data$ps_rank_pc_var)) 
+print(max(data$ps_rank_pc_var)) 
+
+#extreme ps means likely have extreme scores
+
+data$ps_rank_pc_var_clamped <- pmax(pmin(data$ps_rank_pc_var, 0.9999), 0.0001) 
+
+
+# calculate weights.
+data$weights_rank_pc_var <- ifelse(data[["A"]] == 1, 1 / data$ps_rank_pc_var_clamped, 1 / (1 - data$ps_rank_pc_var_clamped)) 
+
+print("min and max weights")
+print(min(data$weights_rank_pc_var)) #1.0001
+print(max(data$weights_rank_pc_var)) #2.8
+
+
+#if customer was actually enrolled (A==1), then d weight as 1/ps, otherwise do 1/(1-ps)
+#So if customer had A=1 & ps=0.8, then weight = 1.25; but if A=0 then weight=5. Scales by unexpectedness of actual event.
+
+# Estimate ACE using the weighted average
+#filter to only people who were enrolled A=1 or A=0
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+# Filter to A0 or A1 groups, get default and multiply by weight; basically, if paid on time, contributes nothing to numerator. numerator = total # of defaults, denominator = total # of people (or sum of weights here)
+EY_a0_ipw_rank_pc_var <- sum(as.numeric(as.character(a0_group$Y)) * a0_group$weights_rank_pc_var)/sum(a0_group$weights_rank_pc_var)
+EY_a1_ipw_rank_pc_var <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_rank_pc_var)/sum(a1_group$weights_rank_pc_var)
+
+ace_ipw_rank_pc_var <- EY_a1_ipw_rank_pc_var - EY_a0_ipw_rank_pc_var
+print(paste("IPW ACE (Rank PC set):", round(ace_ipw_rank_pc_var,4)))
+```
+
+
+# Rank Pc algorithm bootstrap nontransformed
+```{r bootstrap rank pc method nontransformed}
+bootstrap_results_rank_pc <- replicate(bootstrap_sample_size, {
+  #bootstrap sample
+  sample_df <- data[sample(nrow(data), replace = TRUE), ]
+  
+  #create pc markov blanket
+  boot_data <- sample_df %>% 
+  mutate(across(where(is.factor), ~as.numeric(as.factor(.x)))) %>% #rank my factors into numbers
+  select(Y, A, all_of(cov_all))
+  
+  #get correlation, sample size of bootstrapped data
+  suff_boot <- list(C = cor(boot_data, method = "spearman"), n = nrow(boot_data))
+  
+  #Run rank PC Algorithm
+  fit_boot <- pc(suffStat = suff_boot, indepTest = gaussCItest,
+                    labels = colnames(boot_data), alpha = 0.05, verbose = FALSE)
+
+  adj_matrix <- as(fit_boot@graph, "matrix")
+  adj_matrix_input <- pcalg2dagitty(adj_matrix, 
+                        labels = colnames(boot_data), 
+                        type = "cpdag")
+
+  # Get the Markov Blanket (Parents + Children + Spouses)
+  y_indices_all_boot <- markovBlanket(adj_matrix_input, "Y")
+  cov_boot <-y_indices_all_boot #A not longer automatically included
+
+  a_indices_all_boot <- markovBlanket(adj_matrix_input, "A")
+  cov_boot_a <- setdiff(a_indices_all_boot, "Y")  #exclude Y
+
+
+  cov_boot_a <-setdiff(cov_boot_a, "")
+  cov_boot <- setdiff(cov_boot,"")
+
+  #what is markov blanket empty?
+  if(length(cov_boot) == 0 || is.null(cov_boot)) {
+    formula_or_boot <- as.formula("Y ~ 1")
+  } else {
+    formula_or_boot <- as.formula(paste("Y ~ ", paste(cov_boot, collapse = "+")))
+  }
+  if(length(cov_boot_a) == 0 || is.null(cov_boot_a)) {
+    formula_ps_boot <- as.formula("A ~ 1")
+  } else {
+    formula_ps_boot <- as.formula(paste("A ~", paste(cov_boot_a, collapse = "+")))
+  }
+  
+  # outcome regression
+  model_or_boot <- glm(formula_or_boot, data = sample_df, family = binomial)
+  
+  #create fake datasets
+  sample_df_a0 <- sample_df
+  sample_df_a0$A <- factor(0, levels = levels(sample_df$A))
+  sample_df_a1 <- sample_df
+  sample_df_a1$A <- factor(1, levels = levels(sample_df$A))
+
+  # Predict default probability for world of everyone enrolled, and no one enrolled
+  sample_df_prob_Y_if_A1 <- predict(model_or_boot, newdata = sample_df_a1, type = "response") 
+  EY_a1_or_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+  sample_df_prob_Y_if_A0 <- predict(model_or_boot, newdata = sample_df_a0, type = "response") 
+  EY_a0_or_sample_df <- mean(sample_df_prob_Y_if_A0)
+  
+  ace_or_sample_df <- EY_a1_or_sample_df - EY_a0_or_sample_df
+  
+  #IPW
+  #get propensity score
+  model_ps_sample_df <- glm(formula_ps_boot, data = sample_df, family = binomial)
+  sample_df$ps_sample_df <- predict(model_ps_sample_df, type = "response")
+  #clamp ps score between 0.0001 and 0.9999 because otherwise get warnings of fitted prob being 0 or 1 occurring
+  sample_df$ps_sample_df_clamped <- pmax(pmin(sample_df$ps_sample_df, 0.9999), 0.0001)
+  #get weights
+  sample_df$weights_sample_df <- ifelse(sample_df$A == 1, 1/sample_df$ps_sample_df_clamped, 1/(1-sample_df$ps_sample_df_clamped))
+  #divide into a0 and a1 groups
+  a0_group_sample_df <- sample_df[sample_df$A == 0, ]
+  a1_group_sample_df <- sample_df[sample_df$A == 1, ]
+  #calculate ACE
+  EY_a0_ipw_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_sample_df)/sum(a0_group_sample_df$weights_sample_df)
+  EY_a1_ipw_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_sample_df)/sum(a1_group_sample_df$weights_sample_df)
+  ace_ipw_sample_df <-  EY_a1_ipw_sample_df - EY_a0_ipw_sample_df
+
+  return(list(ace_or = ace_or_sample_df, 
+              ace_ipw = ace_ipw_sample_df, 
+              adj_matrix = adj_matrix,
+              blanket = y_indices_all_boot,
+              blanket_a = a_indices_all_boot
+              ))
+}, simplify = FALSE)
+```
+
+
+
+```{r bootstrap variance and bias for rank pc variables}
+orig_ace_rank_pc_var <- c(ace_or_rank_pc_var, ace_ipw_rank_pc_var)
+
+#extract ACE values
+boot_aces_or_rank_pc  <- unlist(lapply(bootstrap_results_rank_pc, function(x) x$ace_or))
+boot_aces_ipw_rank_pc <- unlist(lapply(bootstrap_results_rank_pc, function(x) x$ace_ipw))
+
+#extract markov blanket
+boot_blankets_rank_pc <- lapply(bootstrap_results_rank_pc, function(x) x$blanket)
+boot_blankets_rank_pc_a <- lapply(bootstrap_results_rank_pc, function(x) x$blanket_a)
+
+# convert to dataframe
+boot_df_rank_pc_var <- data.frame(
+  Regression = boot_aces_or_rank_pc,
+  IPW = boot_aces_ipw_rank_pc
+)
+colnames(boot_df_rank_pc_var) <- c("Regression", "IPW")
+
+# Calculate Metrics
+metrics_rank_pc_var <- data.frame(
+  Method = c("Regression", "IPW"),
+  Original_ACE = orig_ace_rank_pc_var, # Use values from the full dataset
+  Bootstrap_ACE = c(mean(boot_df_rank_pc_var$Regression), mean(boot_df_rank_pc_var$IPW)),
+  Standard_Error = c(sd(boot_df_rank_pc_var$Regression), sd(boot_df_rank_pc_var$IPW))
+)
+
+# Calculate Bias
+metrics_rank_pc_var$Bootstrap_Bias <- metrics_rank_pc_var$Bootstrap_ACE - metrics_rank_pc_var$Original_ACE
+print(metrics_rank_pc_var)
+```
+
+
+```{r markov blankets rank pc}
+boot_blankets_rank_pc_unlisted <- unlist(boot_blankets_rank_pc)
+
+boot_mb_stability_rank_pc <- table(boot_blankets_rank_pc_unlisted) / bootstrap_sample_size
+print("Selection Frequency for Y's Markov Blanket:")
+print(sort(boot_mb_stability_rank_pc, decreasing = TRUE))
+```
+
+```{r markov blankets rank pc a}
+boot_blankets_rank_pc_unlisted_a <- unlist(boot_blankets_rank_pc_a)
+
+boot_mb_stability_rank_pc_a <- table(boot_blankets_rank_pc_unlisted_a) / bootstrap_sample_size
+print("Selection Frequency for A's Markov Blanket:")
+print(sort(boot_mb_stability_rank_pc_a, decreasing = TRUE))
+```
+
+```{r DAG avg rank pc, fig.width=10, fig.height=8, out.width="100%"}
+#get adjacent matrices
+all_adj_bootstrap_rank_pc <- lapply(bootstrap_results_rank_pc, function(x) x$adj_matrix)
+#sum them up to get edge frequencies - prob an edge exists between 2 variables
+consensus_matrix_bootstrap_rank_pc <- Reduce("+", all_adj_bootstrap_rank_pc) / bootstrap_sample_size #reduce sums all matrices. if arrow from pay_0 to y is in every bootstrap, then it will have bootstrap_sample_size values in that matrix cell. if only half the time, then half the size.
+
+# Create a graph where an edge exists if it appeared in > 50% of samples
+average_adj_bootstrap_rank_pc <- (consensus_matrix_bootstrap_rank_pc > 0.5) * 1
+
+# Convert back to a graph object for plotting
+avg_graph_bootstrap_rank_pc <- graph_from_adjacency_matrix(average_adj_bootstrap_rank_pc, mode = "directed")
+plot(avg_graph_bootstrap_rank_pc, main = "Consensus DAG (Edges in >50% of Bootstraps)")
+
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/consensus_dag_rank_pc_bootstrap.png", width = 1200, height = 1000, res = 150)
+par(mar = c(1, 1, 3, 1)) 
+plot(avg_graph_bootstrap_rank_pc, 
+     main = "Consensus DAG (Edges in >50% of Bootstraps): Rank PC Method",
+     vertex.size = 15,              # Smaller nodes
+     vertex.label.cex = 0.6,        # Smaller labels
+     vertex.label.dist = 1.2,       # Offset labels from node centers
+     edge.arrow.size = 0.3,         # Smaller arrows
+     edge.curved = 0.2)             # Slight curve to distinguish overlapping arrows
+dev.off()
+```
+
+
+
+
+
+
+# 4 Now the Analysis, for PC-selected variables! (limited vars to most recent month first)
+
+
+# PC Algorithm
+
+Find the markov blanket of Y, consisting of its parents, children, and parents of its children. Y is conditionally independent of all other variables GIVEN its Markov Blanket. 
+
+So: use PC algorithm to find the full DAG. Identify variables directly connected to Y. Run OR and IPW using the variables directly connected to Y.
+
+Note: assumes
+1. Causal sufficiency - no hidden confounders
+2. faithfulness: conditional independencies in the data imply cond ind in the DAG.
+3. Markov condition: variable is conditionally indpendent of its non-descendents given its parents, in the DAG.
+
+PC measures cond ind in the data, and searches for a graph to satisfy them.
+
+1. start with fully connected, UNDIRECTED graph
+2. test for conditional independence amongst all pairs nad subsets of variables --> X ind of Y given Z, for different sets of Z
+3. remove edges based on these tests
+4. continue until we can't remove more edges without violating conditional independences in data
+5. apply orientation rules (colliders etc) to orient undirected edges, as possible
+6. adjust to make sure graph remains acyclic
+
+For Gaussian data, this is like testing if the null hypothesis is rho of X&Y given Z is 0, vs not.
+If data is categorical, can test conditional independence using a chi-square test.
+
+Obtain the DAG.
+
+The "Penalty" of Categorical Data
+
+When you use a Gaussian test (like gaussCItest), the algorithm treats everything as a simple linear correlation. It only needs to find one "slope" to connect two variables.
+
+mixCItest is different. When it tests a factor (like EDUCATION with 4 levels) against your outcome Y:
+    It essentially creates a contingency table or a grouped model.
+    If you only have 500 rows, the data gets split into very small "buckets" (e.g., how many people with "Graduate School" education actually "Defaulted"?).
+    If those buckets are too small, the p-value becomes very large (insignificant), and the algorithm deletes the line.
+2. Loss of Power in Conditional Tests
+The PC algorithm doesn't just test A vs B. It tests A vs B given C, D, and E.
+    As the "Conditioning Set" grows, mixCItest has to slice your 500 rows even thinner.
+    It is much harder to prove that LIMIT_BAL and Y are dependent after accounting for PAY_0 and EDUCATION when using a mixed-type test. The test "gives up" more easily than a purely numeric one would.
+3. "Conservative" by Design
+The micd package (which provides mixCItest) is designed to avoid False Positives. It would rather tell you two variables are independent than show a "fake" causal link. In biostatistics and high-stakes financial modeling, a "Sparse" graph is often considered more trustworthy than a "Spaghetti" graph where everything is connected to everything.
+
+```{r obtain DAG pc}
+pc_data <- data %>%
+  mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+  select(Y, A, all_of(cov_all))
+# pc_data_var_types <- ifelse(sapply(pc_data, is.factor), 1, 0)
+print(summary(pc_data)) #proves data is in right format.
+# attr(pc_data, "adaptDF") <- TRUE
+
+# Run PC; alpha serves as a tuning parameter for the significance of independence tests
+pc_fit_test <- pc(suffStat = pc_data,
+                    indepTest = mixCItest,
+                    labels = colnames(pc_data),
+                    alpha = 0.05, 
+                    verbose = FALSE,
+                    u2pd = "relaxed", 
+                    skel.method = "stable" ,  #order of test doesnt matter
+                    maj.rule = FALSE, #if some say a-->b and some say b-->a, then pick direction with more evidence; if tie, then undirected edge. Setting to false means that in a tie, we just pick a direction (not undirected edge)
+                    solve.confl = FALSE #if some say a-->b and some say b-->a, then pick a direction
+                    )
+
+# Plot DAG
+plot(pc_fit_test@graph, main = "TEST Causal DAG: Markov Blanket Discovery (PC Method)")
+
+#export
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_test.png", width = 1200, height = 1000, res = 150)
+
+plot(pc_fit_test@graph, main = "TEST Causal DAG: Markov Blanket Discovery (PC Method)")
+
+# 3. Close the device to save the file
+dev.off()
+```
+
+
+```{r obtain DAG pc v2}
+# Run PC; alpha serves as a tuning parameter for the significance of independence tests
+pc_fit_test <- pc(suffStat = pc_data,
+                    indepTest = mixCItest,
+                    labels = colnames(pc_data),
+                    alpha = 0.05, 
+                    verbose = FALSE,
+                    u2pd = "relaxed", 
+                    skel.method = "stable" ,  #order of test doesnt matter
+                    maj.rule = FALSE,
+                    solve.confl = TRUE #if some say a-->b and some say b-->a, then pick a direction
+                    )
+
+# Plot DAG
+plot(pc_fit_test@graph, main = "TEST Causal DAG: Markov Blanket Discovery (PC Method)")
+
+#export
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_v2_test.png", width = 1200, height = 1000, res = 150)
+
+plot(pc_fit_test@graph, main = "TEST Causal DAG: Markov Blanket Discovery (PC Method)")
+
+# 3. Close the device to save the file
+dev.off()
+```
+
+
+```{r}
+corrplot(cor(model.matrix(~.-1, data=pc_data)), method="circle")
+
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/correlation_matrix_default_test.png", width = 1000, height = 1000, res = 150)
+corrplot(cor(model.matrix(~.-1, data=pc_data)), method="circle")
+dev.off()
+```
+
+Note the correlation is really low, resulting in the PC algorithm not finding many edges. This is likely because of the categorical variables- the mixCItest is struggling to find significant relationships because of the small effective sample size when conditioning on multiple variables. This is not solved even when we limit to max conditioning set size of 2.
+
+```{r obtain DAG pc trimmed}
+#convert data to numerical for gaussian tests
+pc_data <- data %>%
+  mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+  select(Y, A, all_of(cov_all))
+
+# calculate correlation matrix and sample size; use to test for conditional independence amongst pairs
+# pc_corr_size <- list(C = cor(pc_data), n = nrow(pc_data))
+
+
+pc_fit_bnlearn <- pc.stable(pc_data, 
+                    # blacklist = master_blacklist, 
+                      # test = "mix", #not needed, will automatically detect which test based on variable type
+                    alpha = 0.05)
+
+
+# Get adjacency matrix from PC fit
+# pc_fit_adj_matrix <- amat(pc_fit)
+# print(pc_fit_adj_matrix)
+
+pc_fit_bnlearn_cextend <- cextend(pc_fit_bnlearn) #directs edges as much as possible, but doesn't orient all edges. Still has some undirected edges.
+
+
+pc_fit_bnlearn_maxsx <- pc.stable(pc_data, 
+                    # blacklist = master_blacklist, 
+                      # test = "mix", #not needed, will automatically detect which test based on variable type
+                    alpha = 0.05,
+                    max.sx=2) #limits size of conditioning set to 2, which should help with the power issue of mixCItest, but also means we won't find as many independencies and thus will have a more connected graph. 
+pc_fit_bnlearn_maxsx_cextend <- cextend(pc_fit_bnlearn_maxsx) #directs edges as much as possible, but doesn't orient all edges. Still has some undirected edges.
+
+cov_most_recent <- c("PAY_0", "EDUCATION", "AGE", "SEX", "PAY_AMT1", "BILL_AMT1", "LIMIT_BAL")
+
+pc_data_limitedcov <- pc_data %>%
+  select(Y, A, all_of(cov_most_recent))
+pc_fit_bnlearn_limitedcov <- pc.stable(pc_data_limitedcov, 
+                    # blacklist = master_blacklist, 
+                      # test = "mix", #not needed, will automatically detect which test based on variable type
+                    alpha = 0.05)
+```
+
+```{r}
+
+# Plot DAG
+graphviz.plot(pc_fit_bnlearn, shape = "ellipse",
+     main = "TEST Full Causal DAG, PC Method")
+
+# 2. Export a high-quality version
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_recentmonth_test.png", width = 1600, height = 1200, res = 150)
+graphviz.plot(pc_fit_bnlearn, shape = "ellipse", 
+     main = "TEST Full Causal DAG, PC Method")
+# 3. Close the device to save the file
+dev.off()
+```
+
+```{r}
+# # Plot DAG
+# graphviz.plot(pc_fit_cextend, shape = "ellipse",
+#      main = "Full Causal DAG, PC Method")
+
+# # 2. Export a high-quality version
+# png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_bnlearn_cextend.png", width = 1600, height = 1200, res = 150)
+# graphviz.plot(pc_fit_cextend, shape = "ellipse", 
+#      main = "Full Causal DAG, PC Method")
+# # 3. Close the device to save the file
+# dev.off()
+
+```
+
+```{r}
+
+# Plot DAG
+graphviz.plot(pc_fit_bnlearn_maxsx, shape = "ellipse",
+     main = "Full Causal DAG, PC Method")
+
+# 2. Export a high-quality version
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_bnlearn_maxsx_test.png", width = 1600, height = 1200, res = 150)
+graphviz.plot(pc_fit_bnlearn_maxsx, shape = "ellipse", 
+     main = "TEST Full Causal DAG, PC Method")
+# 3. Close the device to save the file
+dev.off()
+```
+
+```{r}
+# Plot DAG
+graphviz.plot(pc_fit_bnlearn_maxsx_cextend, shape = "ellipse",
+     main = "TEST Full Causal DAG, PC Method")
+
+# 2. Export a high-quality version
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_bnlearn_cextend_maxsx_test.png", width = 1600, height = 1200, res = 150)
+graphviz.plot(pc_fit_bnlearn_maxsx_cextend, shape = "ellipse", 
+     main = "TEST Full Causal DAG, PC Method")
+# 3. Close the device to save the file
+dev.off()
+
+```
+
+
+```{r}
+# Plot DAG
+graphviz.plot(pc_fit_bnlearn_maxsx_cextend, shape = "ellipse",
+     main = "TEST Full Causal DAG, PC Method")
+
+# 2. Export a high-quality version
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_bnlearn_cextend_maxsx_test.png", width = 1600, height = 1200, res = 150)
+graphviz.plot(pc_fit_bnlearn_maxsx_cextend, shape = "ellipse", 
+     main = "TEST Full Causal DAG, PC Method")
+# 3. Close the device to save the file
+dev.off()
+
+```
+
+Since we see this isn't working well and the DAG is very sparse, let's try just limiting to the most recent variables, which should have stronger relationships with Y and thus be easier for the PC algorithm to find edges.
+
+
+```{r}
+
+# Plot DAG
+graphviz.plot(pc_fit_bnlearn_limitedcov, shape = "ellipse",
+     main = "Causal DAG: PC Method, Limited Covariates")
+
+# 2. Export a high-quality version
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_bnlearn_limitedcov.png", width = 1600, height = 1200, res = 150)
+graphviz.plot(pc_fit_bnlearn_limitedcov, shape = "ellipse", 
+     main = "Causal DAG: PC Method, Limited Covariates")
+# 3. Close the device to save the file
+dev.off()
+```
+
+
+
+```{r obtain markov blanket pc }
+# Find indices of variables connected to Y
+pc_y_indices <- bnlearn::nbr(pc_fit_bnlearn_limitedcov, "Y") #all neighbors - but not spouses
+print(pc_y_indices)
+
+#parents, children, spouses using cextend version of the graph, which orients some edges and thus allows us to differentiate between parents and children (but still has some undirected edges, so not perfect)
+pc_y_indices_parents <- bnlearn::parents(pc_fit_bnlearn_limitedcov, "Y")
+pc_y_indices_children <- bnlearn::children(pc_fit_bnlearn_limitedcov, "Y")
+pc_y_indices_spouses <- bnlearn::spouses(pc_fit_bnlearn_limitedcov, "Y")
+print("All relationships identified by PC")
+print(pc_y_indices_children)
+print(pc_y_indices_parents)
+print(pc_y_indices_spouses)
+
+pc_y_indices_all <- unique(c(pc_y_indices_parents, pc_y_indices_children, pc_y_indices_spouses, pc_y_indices))
+print("All variables in Markov Blanket of Y identified by PC:")
+print(pc_y_indices_all)
+
+# Update your covariate list for the models
+cov_pc <- pc_y_indices_all #A not longer automatically included
+print(cov_pc) #only PAY_0?
+```
+
+```{r}
+
+pc_a_indices <- bnlearn::nbr(pc_fit_bnlearn_limitedcov, "A") #all neighbors - but not spouses
+print(pc_a_indices)
+
+#parents, children, spouses using cextend version of the graph, which orients some edges and thus allows us to differentiate between parents and children (but still has some undirected edges, so not perfect)
+pc_a_indices_parents <- bnlearn::parents(pc_fit_bnlearn_limitedcov, "A")
+pc_a_indices_children <- bnlearn::children(pc_fit_bnlearn_limitedcov, "A")
+pc_a_indices_spouses <- bnlearn::spouses(pc_fit_bnlearn_limitedcov, "A")
+print("All relationships identified by PC")
+print(pc_a_indices_children)
+print(pc_a_indices_parents)
+print(pc_a_indices_spouses)
+
+pc_a_indices_all <- unique(c(pc_a_indices_parents, pc_a_indices_children, pc_a_indices_spouses, pc_a_indices))
+print("All variables in Markov Blanket of A identified by PC:")
+print(pc_a_indices_all)
+
+
+cov_pc_a <-setdiff(pc_a_indices_all, "Y") #exclude Y, since we don't want to condition on the outcome in the propensity score model
+print("Variables selected by PC (Markov Blanket of A):")
+print(cov_pc_a)
+```
+
+# pc algorithm nontransformed or
+```{r run or on pc}
+
+#outcome regression
+if(length(cov_pc) == 0) {
+  formula_or_pc <- as.formula("Y ~ 1")
+} else {
+  formula_or_pc <- as.formula(paste("Y ~ ", paste(cov_pc, collapse = "+")))
+}
+model_or_pc <- glm(formula_or_pc, data = data, family = binomial)
+
+print("formula")
+print(formula_or_pc)
+
+# pc_data_all_enrolled <- data_all_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# pc_data_no_enrolled <- data_no_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# Predict default probability for world of everyone enrolled, and no one enrolled
+data$prob_Y_if_A1_pc_var<- predict(model_or_pc, newdata = data_all_enrolled, type = "response") #type=response gives 0-1 prob
+
+EY_a1_or_pc_var <- mean(data$prob_Y_if_A1_pc_var)
+
+data$prob_Y_if_A0_pc_var <- predict(model_or_pc, newdata = data_no_enrolled, type = "response")
+EY_a0_or_pc_var <- mean(data$prob_Y_if_A0_pc_var)
+
+ace_or_pc_var <- EY_a1_or_pc_var - EY_a0_or_pc_var
+
+#print means
+print("Default likelihood (PC Set, OR), A=1 then A=0")
+print(EY_a1_or_pc_var)
+print(EY_a0_or_pc_var)
+
+print(paste("OR ACE (PC Set):", round(ace_or_pc_var,4))) 
+```
+
+
+
+# PC algorithm nonttransformed ipw
+
+```{r IPW pc var calc ps }
+
+if(length(cov_pc_a) == 0) {
+  formula_ps_pc_var <- as.formula("A ~ 1")
+} else {
+  formula_ps_pc_var <- as.formula(paste("A~", paste(cov_pc_a, collapse = "+"))) #formula of A~pc covariates
+}
+#get propensity scores
+model_ps_pc_var <- glm(formula_ps_pc_var, data = data, family = binomial) #binomial because only 2 outcomes
+
+print("formula")
+print(formula_ps_pc_var)
+
+data$ps_pc_var <- predict(model_ps_pc_var, type = "response") #calculate propensity scores for all customers; response transforms to probabilities.
+print("min and max ps")
+print(min(data$ps_pc_var)) 
+print(max(data$ps_pc_var)) 
+
+#extreme ps means likely have extreme scores
+
+data$ps_pc_var_clamped <- pmax(pmin(data$ps_pc_var, 0.9999), 0.0001) 
+
+
+# calculate weights.
+data$weights_pc_var <- ifelse(data[["A"]] == 1, 1 / data$ps_pc_var_clamped, 1 / (1 - data$ps_pc_var_clamped)) 
+
+print("min and max weights")
+print(min(data$weights_pc_var)) #1.0001
+print(max(data$weights_pc_var)) #2.8
+
+
+#if customer was actually enrolled (A==1), then d weight as 1/ps, otherwise do 1/(1-ps)
+#So if customer had A=1 & ps=0.8, then weight = 1.25; but if A=0 then weight=5. Scales by unexpectedness of actual event.
+
+# Estimate ACE using the weighted average
+#filter to only people who were enrolled A=1 or A=0
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+# Filter to A0 or A1 groups, get default and multiply by weight; basically, if paid on time, contributes nothing to numerator. numerator = total # of defaults, denominator = total # of people (or sum of weights here)
+EY_a0_ipw_pc_var <- sum(as.numeric(as.character(a0_group$Y)) * a0_group$weights_pc_var)/sum(a0_group$weights_pc_var)
+EY_a1_ipw_pc_var <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_pc_var)/sum(a1_group$weights_pc_var)
+
+ace_ipw_pc_var <- EY_a1_ipw_pc_var - EY_a0_ipw_pc_var
+print(paste("IPW ACE (PC set):", round(ace_ipw_pc_var,4)))
+```
+
+
+
+# Pc algorithm bootstrap nontransformed
+```{r bootstrap pc method nontransformed}
+bootstrap_results_pc <- replicate(bootstrap_sample_size, {
+  #bootstrap sample
+  sample_df <- data[sample(nrow(data), replace = TRUE), ]
+  
+  #convert data to numerical for gaussian tests
+  sample_df_pc_data <- sample_df %>%
+    mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+    select(Y, A, all_of(cov_all))
+
+  cov_most_recent <- c("PAY_0", "EDUCATION", "AGE", "SEX", "PAY_AMT1", "BILL_AMT1", "LIMIT_BAL")
+
+  sample_df_pc_data_limitedcov <- sample_df_pc_data %>%
+    select(Y, A, all_of(cov_most_recent))
+
+  pc_fit_boot <- pc.stable(sample_df_pc_data_limitedcov, 
+                    # blacklist = master_blacklist, 
+                      # test = "mix", #not needed, will automatically detect which test based on variable type
+                    alpha = 0.05)
+
+  adj_matrix <- bnlearn::amat(pc_fit_boot)
+
+  #extract markov blanket for y
+  y_indices_boot <- bnlearn::nbr(pc_fit_boot, "Y") #all neighbors - but not spouses
+
+  #parents, children, spouses using cextend version of the graph, which orients some edges and thus allows us to differentiate between parents and children (but still has some undirected edges, so not perfect)
+  y_indices_parents_boot <- bnlearn::parents(pc_fit_boot, "Y")
+  y_indices_children_boot <- bnlearn::children(pc_fit_boot, "Y")
+  y_indices_spouses_boot <- bnlearn::spouses(pc_fit_boot, "Y")
+ 
+  y_indices_all_boot <- unique(c(y_indices_parents_boot, y_indices_children_boot, y_indices_spouses_boot, y_indices_boot))
+
+  # Update  covariate list for the models
+  cov_pc_boot <- y_indices_all_boot#A not longer automatically included
+
+
+  #now for a
+  a_indices_boot <- bnlearn::nbr(pc_fit_boot, "A") #all neighbors - but not spouses
+  print(a_indices_boot)
+
+  #parents, children, spouses using cextend version of the graph, which orients some edges and thus allows us to differentiate between parents and children (but still has some undirected edges, so not perfect)
+  a_indices_parents_boot <- bnlearn::parents(pc_fit_boot, "A")
+  a_indices_children_boot <- bnlearn::children(pc_fit_boot, "A")
+  a_indices_spouses_boot <- bnlearn::spouses(pc_fit_boot, "A")
+
+  a_indices_all_boot <- unique(c(a_indices_parents_boot, a_indices_children_boot, a_indices_spouses_boot, a_indices_boot))
+
+  cov_pc_boot_a <-setdiff(a_indices_all_boot, "Y")
+  
+  cov_pc_boot_a <-setdiff(cov_pc_boot_a, "")
+  cov_pc_boot <- setdiff(cov_pc_boot,"")
+  # what if the blanket is empty? or
+  if(length(cov_pc_boot) == 0 || is.null(cov_pc_boot)) {
+    formula_or_pc_boot <- as.formula("Y ~ 1")
+  } else {
+    formula_or_pc_boot <- as.formula(paste("Y ~ ", paste(cov_pc_boot, collapse = "+")))
+  }
+  #ipw
+  if(length(cov_pc_boot_a) == 0 || is.null(cov_pc_boot_a)) {
+    formula_ps_pc_boot <- as.formula("A ~ 1")
+  } else {
+    formula_ps_pc_boot <- as.formula(paste("A ~", paste(cov_pc_boot_a, collapse = "+")))
+  }
+  
+  # outcome regression
+  model_or_pc_boot <- glm(formula_or_pc_boot, data = sample_df, family = binomial)
+  
+  #create fake datasets
+  sample_df_a0 <- sample_df
+  sample_df_a0$A <- factor(0, levels = levels(sample_df$A))
+  sample_df_a1 <- sample_df
+  sample_df_a1$A <- factor(1, levels = levels(sample_df$A))
+
+  # Predict default probability for world of everyone enrolled, and no one enrolled
+  sample_df_prob_Y_if_A1 <- predict(model_or_pc_boot, newdata = sample_df_a1, type = "response") 
+  EY_a1_or_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+  sample_df_prob_Y_if_A0 <- predict(model_or_pc_boot, newdata = sample_df_a0, type = "response") 
+  EY_a0_or_sample_df <- mean(sample_df_prob_Y_if_A0)
+  
+  ace_or_sample_df <- EY_a1_or_sample_df - EY_a0_or_sample_df
+  
+  #IPW
+  #get propensity score
+  model_ps_sample_df <- glm(formula_ps_pc_boot, data = sample_df, family = binomial)
+  sample_df$ps_sample_df <- predict(model_ps_sample_df, type = "response")
+  #clamp ps score between 0.0001 and 0.9999 because otherwise get warnings of fitted prob being 0 or 1 occurring
+  sample_df$ps_sample_df_clamped <- pmax(pmin(sample_df$ps_sample_df, 0.9999), 0.0001)
+  #get weights
+  sample_df$weights_sample_df <- ifelse(sample_df$A == 1, 1/sample_df$ps_sample_df_clamped, 1/(1-sample_df$ps_sample_df_clamped))
+  #divide into a0 and a1 groups
+  a0_group_sample_df <- sample_df[sample_df$A == 0, ]
+  a1_group_sample_df <- sample_df[sample_df$A == 1, ]
+  #calculate ACE
+  EY_a0_ipw_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_sample_df)/sum(a0_group_sample_df$weights_sample_df)
+  EY_a1_ipw_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_sample_df)/sum(a1_group_sample_df$weights_sample_df)
+  ace_ipw_sample_df <-  EY_a1_ipw_sample_df - EY_a0_ipw_sample_df
+
+  return(list(ace_or = ace_or_sample_df, 
+              ace_ipw = ace_ipw_sample_df, 
+              adj_matrix = adj_matrix,
+              blanket = y_indices_all_boot,
+              blanket_a = a_indices_all_boot
+              ))
+}, simplify = FALSE)
+```
+
+
+```{r bootstrap variance and bias for pc variables}
+orig_ace_pc_var <- c(ace_or_pc_var, ace_ipw_pc_var)
+
+#extract ACE values
+boot_aces_or_pc  <- unlist(lapply(bootstrap_results_pc, function(x) x$ace_or))
+boot_aces_ipw_pc <- unlist(lapply(bootstrap_results_pc, function(x) x$ace_ipw))
+
+#extract markov blanket
+boot_blankets_pc <- lapply(bootstrap_results_pc, function(x) x$blanket)
+boot_blankets_pc_a <- lapply(bootstrap_results_pc, function(x) x$blanket_a)
+
+# convert to dataframe
+boot_df_pc_var <- data.frame(
+  Regression = boot_aces_or_pc,
+  IPW = boot_aces_ipw_pc
+)
+colnames(boot_df_pc_var) <- c("Regression", "IPW")
+
+# Calculate Metrics
+metrics_pc_var <- data.frame(
+  Method = c("Regression", "IPW"),
+  Original_ACE = orig_ace_pc_var, # Use values from the full dataset
+  Bootstrap_ACE = c(mean(boot_df_pc_var$Regression), mean(boot_df_pc_var$IPW)),
+  Standard_Error = c(sd(boot_df_pc_var$Regression), sd(boot_df_pc_var$IPW))
+)
+
+# Calculate Bias
+metrics_pc_var$Bootstrap_Bias <- metrics_pc_var$Bootstrap_ACE - metrics_pc_var$Original_ACE
+print(metrics_pc_var)
+```
+
+```{r markov blankets}
+boot_blankets_pc_unlisted <- unlist(boot_blankets_pc)
+
+boot_mb_stability_pc <- table(boot_blankets_pc_unlisted) / bootstrap_sample_size
+print("Selection Frequency for Y's Markov Blanket:")
+print(sort(boot_mb_stability_pc, decreasing = TRUE))
+```
+
+```{r markov blankets a}
+boot_blankets_pc_a_unlisted <- unlist(boot_blankets_pc_a)
+
+boot_mb_stability_pc_a <- table(boot_blankets_pc_a_unlisted) / bootstrap_sample_size
+print("Selection Frequency for A's Markov Blanket:")
+print(sort(boot_mb_stability_pc_a, decreasing = TRUE))
+```
+
+```{r DAG avg, fig.width=10, fig.height=8, out.width="100%"}
+#get adjacent matrices
+all_adj_bootstrap_pc <- lapply(bootstrap_results_pc, function(x) x$adj_matrix)
+#sum them up to get edge frequencies - prob an edge exists between 2 variables
+consensus_matrix_bootstrap_pc <- Reduce("+", all_adj_bootstrap_pc) / bootstrap_sample_size #reduce sums all matrices. if arrow from pay_0 to y is in every bootstrap, then it will have bootstrap_sample_size values in that matrix cell. if only half the time, then half the size.
+
+# Create a graph where an edge exists if it appeared in > 50% of samples
+average_adj_bootstrap_pc <- (consensus_matrix_bootstrap_pc > 0.5) * 1
+
+# Convert back to a graph object for plotting
+avg_graph_bootstrap_pc <- graph_from_adjacency_matrix(average_adj_bootstrap_pc, mode = "directed")
+
+plot(avg_graph_bootstrap_pc, 
+     main = "Consensus DAG (Edges in >50% of Bootstraps): PC Method, Limited Covariates",
+     vertex.size = 15,              # Smaller nodes
+     vertex.label.cex = 0.6,        # Smaller labels
+     vertex.label.dist = 1.2,       # Offset labels from node centers
+     edge.arrow.size = 0.3,         # Smaller arrows
+     edge.curved = 0.2)             # Slight curve to distinguish overlapping arrows
+
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/consensus_dag_pc_bootstrap_limitedcov.png", width = 1200, height = 1000, res = 150)
+par(mar = c(1, 1, 3, 1)) 
+plot(avg_graph_bootstrap_pc, 
+     main = "Consensus DAG (Edges in >50% of Bootstraps): PC Method, Limited Covariates",
+     vertex.size = 15,              # Smaller nodes
+     vertex.label.cex = 0.6,        # Smaller labels
+     vertex.label.dist = 1.2,       # Offset labels from node centers
+     edge.arrow.size = 0.3,         # Smaller arrows
+     edge.curved = 0.2)             # Slight curve to distinguish overlapping arrows
+dev.off()
+```
+
+
+
+# 5 Now the Analysis, for PC-selected variables! (full cov)
+
+```{r obtain DAG pc full}
+pc_data <- data %>%
+  mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+  select(Y, A, all_of(cov_all))
+# pc_data_var_types <- ifelse(sapply(pc_data, is.factor), 1, 0)
+print(summary(pc_data)) #proves data is in right format.
+# attr(pc_data, "adaptDF") <- TRUE
+
+# Run PC; alpha serves as a tuning parameter for the significance of independence tests
+pc_fit_test_full_fin <- pc(suffStat = pc_data,
+                    indepTest = mixCItest,
+                    labels = colnames(pc_data),
+                    alpha = 0.05, 
+                    verbose = FALSE,
+                    u2pd = "relaxed", 
+                    skel.method = "stable" ,  #order of test doesnt matter
+                    maj.rule = FALSE,
+                    solve.confl = TRUE #if some say a-->b and some say b-->a, then pick a direction
+                    )
+
+# Plot DAG
+plot(pc_fit_test_full_fin@graph, main = "Causal DAG: PC Method, All Covariates")
+
+#export
+png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/causal_dag_pc_method_fullcov.png", width = 1200, height = 1000, res = 150)
+
+plot(pc_fit_test_full_fin@graph, main = "Causal DAG: PC Method, All Covariates")
+
+# 3. Close the device to save the file
+dev.off()
+```
+ 
+
+
+
+```{r obtain markov blanket pc full }
+
+pc_full_dag <- pcalg2dagitty(as(pc_fit_test_full_fin@graph, "matrix"), 
+                       labels = colnames(pc_data), 
+                       type = "cpdag")
+
+# Get the Markov Blanket (Parents + Children + Spouses)
+pc_full_mb_y <- markovBlanket(pc_full_dag, "Y")
+print(pc_full_mb_y)
+
+# Update your covariate list for the models
+cov_pc_full <- pc_full_mb_y #A not longer automatically included
+print(cov_pc_full) #only PAY_0?
+```
+
+```{r}
+# Get the Markov Blanket (Parents + Children + Spouses)
+pc_full_mb_a <- markovBlanket(pc_full_dag, "A")
+print(pc_full_mb_a)
+
+# Update your covariate list for the models
+cov_pc_full_a <- pc_full_mb_a #A not longer automatically included
+print(cov_pc_full_a) #only PAY_0?
+```
+
+# pc algorithm nontransformed or
+```{r run or on pc full}
+
+#outcome regression
+if(length(cov_pc_full) == 0) {
+  formula_or_pc_full <- as.formula("Y ~ 1")
+} else {
+  formula_or_pc_full <- as.formula(paste("Y ~ ", paste(cov_pc_full, collapse = "+")))
+}
+model_or_pc_full <- glm(formula_or_pc_full, data = data, family = binomial)
+
+print("formula")
+print(formula_or_pc_full)
+
+# pc_data_all_enrolled <- data_all_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# pc_data_no_enrolled <- data_no_enrolled %>%
+#   # mutate(across(everything(), as.numeric)) %>%
+#   select(Y, A, all_of(cov_all))
+
+# Predict default probability for world of everyone enrolled, and no one enrolled
+data$prob_Y_if_A1_pc_var_full<- predict(model_or_pc_full, newdata = data_all_enrolled, type = "response") #type=response gives 0-1 prob
+
+EY_a1_or_pc_var_full <- mean(data$prob_Y_if_A1_pc_var_full)
+
+data$prob_Y_if_A0_pc_var_full <- predict(model_or_pc_full, newdata = data_no_enrolled, type = "response")
+EY_a0_or_pc_var_full <- mean(data$prob_Y_if_A0_pc_var_full)
+
+ace_or_pc_var_full <- EY_a1_or_pc_var_full - EY_a0_or_pc_var_full
+
+#print means
+print("Default likelihood (PC Set, OR), A=1 then A=0")
+print(EY_a1_or_pc_var_full)
+print(EY_a0_or_pc_var_full)
+
+print(paste("OR ACE (PC Set):", round(ace_or_pc_var_full,4))) 
+```
+
+
+
+# PC algorithm nonttransformed ipw
+
+```{r IPW pc var calc ps full}
+
+if(length(cov_pc_full_a) == 0) {
+  formula_ps_pc_var_full <- as.formula("A ~ 1")
+} else {
+  formula_ps_pc_var_full <- as.formula(paste("A~", paste(cov_pc_full_a, collapse = "+"))) #formula of A~pc covariates
+}
+#get propensity scores
+model_ps_pc_var_full <- glm(formula_ps_pc_var_full, data = data, family = binomial) #binomial because only 2 outcomes
+
+print("formula")
+print(formula_ps_pc_var_full)
+
+data$ps_pc_var_full <- predict(model_ps_pc_var_full, type = "response") #calculate propensity scores for all customers; response transforms to probabilities.
+print("min and max ps")
+print(min(data$ps_pc_var_full)) 
+print(max(data$ps_pc_var_full)) 
+
+#extreme ps means likely have extreme scores
+
+data$ps_pc_var_clamped_full <- pmax(pmin(data$ps_pc_var_full, 0.9999), 0.0001) 
+
+
+# calculate weights.
+data$weights_pc_var_full <- ifelse(data[["A"]] == 1, 1 / data$ps_pc_var_clamped_full, 1 / (1 - data$ps_pc_var_clamped_full)) 
+
+print("min and max weights")
+print(min(data$weights_pc_var_full)) #1.0001
+print(max(data$weights_pc_var_full)) #2.8
+
+#if customer was actually enrolled (A==1), then d weight as 1/ps, otherwise do 1/(1-ps)
+#So if customer had A=1 & ps=0.8, then weight = 1.25; but if A=0 then weight=5. Scales by unexpectedness of actual event.
+
+# Estimate ACE using the weighted average
+#filter to only people who were enrolled A=1 or A=0
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+# Filter to A0 or A1 groups, get default and multiply by weight; basically, if paid on time, contributes nothing to numerator. numerator = total # of defaults, denominator = total # of people (or sum of weights here)
+EY_a0_ipw_pc_var_full <- sum(as.numeric(as.character(a0_group$Y)) * a0_group$weights_pc_var_full)/sum(a0_group$weights_pc_var_full)
+EY_a1_ipw_pc_var_full <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_pc_var_full)/sum(a1_group$weights_pc_var_full)
+
+ace_ipw_pc_var_full <- EY_a1_ipw_pc_var_full - EY_a0_ipw_pc_var_full
+print(paste("IPW ACE (PC set):", round(ace_ipw_pc_var_full,4)))
+```
+
+
+
+# Pc algorithm bootstrap nontransformed
+```{r bootstrap pc method nontransformed full}
+# bootstrap_results_pc_full <- replicate(bootstrap_sample_size, {
+#   #bootstrap sample
+#   sample_df <- data[sample(nrow(data), replace = TRUE), ]
+  
+#   #convert data to numerical for gaussian tests
+#   sample_df_pc_data <- sample_df %>%
+#     mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+#     select(Y, A, all_of(cov_all))
+
+#   # Run PC; alpha serves as a tuning parameter for the significance of independence tests
+#   pc_fit_boot <- pc(suffStat = sample_df_pc_data,
+#                       indepTest = mixCItest,
+#                       labels = colnames(sample_df_pc_data),
+#                       alpha = 0.05, 
+#                       verbose = FALSE,
+#                       u2pd = "relaxed", 
+#                       skel.method = "stable" ,  #order of test doesnt matter
+#                       maj.rule = FALSE,
+#                       solve.confl = TRUE #if some say a-->b and some say b-->a, then pick a direction
+#                       )
+
+#   adj_matrix <- as(pc_fit_boot@graph, "matrix")
+#   adj_matrix_input <- pcalg2dagitty(adj_matrix, 
+#                         labels = colnames(sample_df_pc_data), 
+#                         type = "cpdag")
+
+#   # Get the Markov Blanket (Parents + Children + Spouses)
+#   y_indices_all_boot <- markovBlanket(adj_matrix_input, "Y")
+
+#   # Update your covariate list for the models
+#   cov_pc_boot <- y_indices_all_boot #A not longer automatically included
+
+#   a_indices_all_boot <- markovBlanket(adj_matrix_input, "A")
+
+#   cov_pc_boot_a <- setdiff(a_indices_all_boot, "Y") 
+
+
+#   cov_pc_boot_a <-setdiff(cov_pc_boot_a, "")
+#   cov_pc_boot <- setdiff(cov_pc_boot,"")
+#   # what if the blanket is empty? or
+#   if(length(cov_pc_boot) == 0 || is.null(cov_pc_boot)) {
+#     formula_or_pc_boot <- as.formula("Y ~ 1")
+#   } else {
+#     formula_or_pc_boot <- as.formula(paste("Y ~ ", paste(cov_pc_boot, collapse = "+")))
+#   }
+#   #ipw
+#   if(length(cov_pc_boot_a) == 0 || is.null(cov_pc_boot_a)) {
+#     formula_ps_pc_boot <- as.formula("A ~ 1")
+#   } else {
+#     formula_ps_pc_boot <- as.formula(paste("A ~", paste(cov_pc_boot_a, collapse = "+")))
+#   }
+  
+#   # outcome regression
+#   model_or_pc_boot <- glm(formula_or_pc_boot, data = sample_df, family = binomial)
+  
+#   #create fake datasets
+#   sample_df_a0 <- sample_df
+#   sample_df_a0$A <- factor(0, levels = levels(sample_df$A))
+#   sample_df_a1 <- sample_df
+#   sample_df_a1$A <- factor(1, levels = levels(sample_df$A))
+
+#   # Predict default probability for world of everyone enrolled, and no one enrolled
+#   sample_df_prob_Y_if_A1 <- predict(model_or_pc_boot, newdata = sample_df_a1, type = "response") 
+#   EY_a1_or_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+#   sample_df_prob_Y_if_A0 <- predict(model_or_pc_boot, newdata = sample_df_a0, type = "response") 
+#   EY_a0_or_sample_df <- mean(sample_df_prob_Y_if_A0)
+  
+#   ace_or_sample_df <- EY_a1_or_sample_df - EY_a0_or_sample_df
+  
+#   #IPW
+#   #get propensity score
+#   model_ps_sample_df <- glm(formula_ps_pc_boot, data = sample_df, family = binomial)
+#   sample_df$ps_sample_df <- predict(model_ps_sample_df, type = "response")
+#   #clamp ps score between 0.0001 and 0.9999 because otherwise get warnings of fitted prob being 0 or 1 occurring
+#   sample_df$ps_sample_df_clamped <- pmax(pmin(sample_df$ps_sample_df, 0.9999), 0.0001)
+#   #get weights
+#   sample_df$weights_sample_df <- ifelse(sample_df$A == 1, 1/sample_df$ps_sample_df_clamped, 1/(1-sample_df$ps_sample_df_clamped))
+#   #divide into a0 and a1 groups
+#   a0_group_sample_df <- sample_df[sample_df$A == 0, ]
+#   a1_group_sample_df <- sample_df[sample_df$A == 1, ]
+#   #calculate ACE
+#   EY_a0_ipw_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_sample_df)/sum(a0_group_sample_df$weights_sample_df)
+#   EY_a1_ipw_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_sample_df)/sum(a1_group_sample_df$weights_sample_df)
+#   ace_ipw_sample_df <-  EY_a1_ipw_sample_df - EY_a0_ipw_sample_df
+
+#   return(list(ace_or = ace_or_sample_df, 
+#               ace_ipw = ace_ipw_sample_df, 
+#               adj_matrix = adj_matrix,
+#               blanket = y_indices_all_boot,
+#               blanket_a = a_indices_all_boot
+#               ))
+#               }, simplify = FALSE)
+```
+
+
+```{r bootstrap variance and bias for pc variables full}
+orig_ace_pc_var_full <- c(ace_or_pc_var_full, ace_ipw_pc_var_full)
+```
+
+```{r}
+#extract ACE values
+# boot_aces_or_pc_full  <- unlist(lapply(bootstrap_results_pc_full, function(x) x$ace_or))
+# boot_aces_ipw_pc_full <- unlist(lapply(bootstrap_results_pc_full, function(x) x$ace_ipw))
+
+# #extract markov blanket
+# boot_blankets_pc_full <- lapply(bootstrap_results_pc_full, function(x) x$blanket)
+# boot_blankets_pc_a_full <- lapply(bootstrap_results_pc_full, function(x) x$blanket_a)
+
+# # convert to dataframe
+# boot_df_pc_var_full <- data.frame(
+#   Regression = boot_aces_or_pc_full,
+#   IPW = boot_aces_ipw_pc_full
+# )
+# colnames(boot_df_pc_var_full) <- c("Regression", "IPW")
+
+# # Calculate Metrics
+# metrics_pc_var_full <- data.frame(
+#   Method = c("Regression", "IPW"),
+#   Original_ACE = orig_ace_pc_var_full, # Use values from the full dataset
+#   Bootstrap_ACE = c(mean(boot_df_pc_var_full$Regression), mean(boot_df_pc_var_full$IPW)),
+#   Standard_Error = c(sd(boot_df_pc_var_full$Regression), sd(boot_df_pc_var_full$IPW))
+# )
+
+# # Calculate Bias
+# metrics_pc_var_full$Bootstrap_Bias <- metrics_pc_var_full$Bootstrap_ACE - metrics_pc_var_full$Original_ACE
+# print(metrics_pc_var_full)
+```
+
+```{r markov blankets full}
+# boot_blankets_pc_unlisted_full <- unlist(boot_blankets_pc_full)
+
+# boot_mb_stability_pc_full <- table(boot_blankets_pc_unlisted_full) / bootstrap_sample_size
+# print("Selection Frequency for Y's Markov Blanket:")
+# print(sort(boot_mb_stability_pc_full, decreasing = TRUE))
+```
+
+```{r markov blankets a full}
+# boot_blankets_pc_a_unlisted_full <- unlist(boot_blankets_pc_a_full)
+
+# boot_mb_stability_pc_a_full <- table(boot_blankets_pc_a_unlisted_full) / bootstrap_sample_size
+# print("Selection Frequency for A's Markov Blanket:")
+# print(sort(boot_mb_stability_pc_a_full, decreasing = TRUE))
+```
+
+```{r DAG avg full, fig.width=10, fig.height=8, out.width="100%"}
+# #get adjacent matrices
+# all_adj_bootstrap_pc_full <- lapply(bootstrap_results_pc_full, function(x) x$adj_matrix)
+# #sum them up to get edge frequencies - prob an edge exists between 2 variables
+# consensus_matrix_bootstrap_pc_full <- Reduce("+", all_adj_bootstrap_pc_full) / bootstrap_sample_size #reduce sums all matrices. if arrow from pay_0 to y is in every bootstrap, then it will have bootstrap_sample_size values in that matrix cell. if only half the time, then half the size.
+
+# # Create a graph where an edge exists if it appeared in > 50% of samples
+# average_adj_bootstrap_pc_full <- (consensus_matrix_bootstrap_pc_full > 0.5) * 1
+
+# # Convert back to a graph object for plotting
+# avg_graph_bootstrap_pc_full <- graph_from_adjacency_matrix(average_adj_bootstrap_pc_full, mode = "directed")
+# plot(avg_graph_bootstrap_pc_full, main = "Consensus DAG (Edges in >50% of Bootstraps)")
+
+# png("OUTPUT_IMAGES_FROM_ANALYSIS_V5/consensus_dag_pc_bootstrap_full.png", width = 1200, height = 1000, res = 150)
+# par(mar = c(1, 1, 3, 1)) 
+# plot(avg_graph_bootstrap_pc_full, 
+#      main = "Consensus DAG (Edges in >50% of Bootstraps): PC Method, All Covariates",
+#      vertex.size = 15,              # Smaller nodes
+#      vertex.label.cex = 0.6,        # Smaller labels
+#      vertex.label.dist = 1.2,       # Offset labels from node centers
+#      edge.arrow.size = 0.3,         # Smaller arrows
+#      edge.curved = 0.2)             # Slight curve to distinguish overlapping arrows
+# dev.off()
+```
+
+
+
+
+# 6 Now the Analysis, for Local discovery methods
+
+Use MMPC from bnlearn. The max-min parents and children algorithm. This searches the neighborhood of Y (parents and children) by testing for conditional independence at the alpha=0.05 level. Variable is only kept if relationship with Y can't be explained away by other variables.
+
+# nontransformed, local method
+
+IAMB (Incremental Association)
+
+The most common "Gold Standard" for medium-sized datasets.
+
+    How it works: It is dynamic. In every step of the growth phase, it re-tests all remaining variables and picks the one with the highest Mutual Information (or lowest p-value) given the current blanket.
+
+    The Pros: Much more reliable at finding the correct parents, children, and spouses than GS.
+
+    The Cons: Slower than GS (it runs O(n2) tests).
+
+    N=500 Performance: Recommended. This is the most balanced choice for your credit data.
+
+
+
+```{r}
+#convert data to numerical 
+local_data <- data %>%
+  mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+  select(Y, A, all_of(cov_all))
+
+local_data_test_mbonly <- local_data %>%
+    mutate(across(everything(), function(x) {
+      if(is.factor(x) || is.character(x)) as.numeric(as.factor(x)) else rank(x)
+    }))
+
+
+# Run nbr to find the markov blanket of Y only
+local_y <- learn.mb(local_data_test_mbonly, node = "Y", method = "inter.iamb", alpha = 0.05, test = "cor")
+
+print("Variables in the Local Neighborhood (Parents/Children) of Y:")
+print(local_y)
+
+# Extract adjustment set (exclude treatment A)
+cov_local <-local_y #L
+print(cov_local)
+
+
+#now do the same for A to get covariates for propensity score model
+local_a <- learn.mb(local_data_test_mbonly, node = "A", method = "inter.iamb", alpha = 0.05, test = "cor")
+print("Variables in the Local Neighborhood (Parents/Children) of A:")
+print(local_a)
+cov_local_a <-setdiff(local_a, "Y") #exclude Y, since we don't want to condition on the outcome in the propensity score model
+print(cov_local_a)
+```
+
+
+# local algorithm nontransformed or
+
+```{r or local algorithm}
+# --- Outcome Regression (Local Set) ---
+if (length(cov_local) == 0) {
+  formula_or_local <- as.formula("Y ~ 1")
+} else {
+  formula_or_local <- as.formula(paste("Y ~ ", paste(cov_local, collapse = " + ")))
+}
+
+model_or_local <- glm(formula_or_local, data = data, family = binomial)
+
+# Counterfactual predictions
+EY_a1_or_local <- mean(predict(model_or_local, newdata = data_all_enrolled, type = "response"))
+EY_a0_or_local <- mean(predict(model_or_local, newdata = data_no_enrolled, type = "response"))
+ace_or_local <- EY_a1_or_local - EY_a0_or_local
+
+print(paste("Local Discovery OR ACE:", round(ace_or_local, 4)))
+```
+
+# local algorithm nontransformed ipw
+
+```{r ipw local algorithm}
+if (length(cov_local_a) == 0) {
+  formula_ps_local <- as.formula("A ~ 1")
+} else {
+  formula_ps_local <- as.formula(paste("A ~", paste(cov_local_a, collapse = " + ")))
+}
+
+model_ps_local <- glm(formula_ps_local, data = data, family = binomial)
+data$ps_local <- predict(model_ps_local, type = "response")
+data$ps_local_clamped <- pmax(pmin(data$ps_local, 0.9999), 0.0001)
+
+# Weights
+data$weights_local <- ifelse(data$A == 1, 1 / data$ps_local_clamped, 1 / (1 - data$ps_local_clamped))
+
+a0_group <- data[data$A == 0, ]
+a1_group <- data[data$A == 1, ]
+
+
+EY_a0_ipw_local <- sum(as.numeric(as.character(a0_group$Y)) * a0_group$weights_local)/sum(a0_group$weights_local)
+EY_a1_ipw_local <- sum(as.numeric(as.character(a1_group$Y)) * a1_group$weights_local)/sum(a1_group$weights_local)
+
+ace_ipw_local <- EY_a1_ipw_local - EY_a0_ipw_local
+print(paste("Local Discovery IPW ACE:", round(ace_ipw_local, 4)))
+```
+
+
+# local algorithm nontransformed bootstrap
+
+```{r bootstrap local}
+bootstrap_results_local <- replicate(bootstrap_sample_size, {
+  sample_df <- data[sample(nrow(data), replace = TRUE), ]
+  
+  
+  sample_df_local <- sample_df %>%
+    mutate(across(where(is.integer), as.numeric)) %>% #convert all integers to numeric, to run
+    select(Y, A, all_of(cov_all))
+
+  sample_df_ranked <- sample_df_local %>%
+    mutate(across(everything(), function(x) {
+      if(is.factor(x) || is.character(x)) as.numeric(as.factor(x)) else rank(x)
+    }))
+
+  # Run nbr to find the markov blanket of Y only
+  local_y_boot <- tryCatch({
+    learn.mb(sample_df_ranked, node = "Y", method = "inter.iamb", test = "cor", alpha = 0.05)
+  }, error = function(e) character(0))
+  cov_local_boot <- local_y_boot #A not longer automatically included
+  
+  local_a_boot <- tryCatch({
+    learn.mb(sample_df_ranked, node = "A", method = "inter.iamb", test = "cor", alpha = 0.05)
+  }, error = function(e) character(0))
+   cov_local_boot_a <- setdiff(local_a_boot, "Y")
+
+
+  cov_local_boot_a <-setdiff(cov_local_boot_a, "")
+  cov_local_boot <- setdiff(cov_local_boot,"")
+  # what if the blanket is empty? or
+  
+  if (length(cov_local_boot) == 0 || is.null(cov_local_boot)) {
+    formula_or_local_boot <- as.formula("Y ~ 1")
+  } else {
+    formula_or_local_boot <- as.formula(paste("Y ~ ", paste(cov_local_boot, collapse = " + ")))
+  }
+  if (length(cov_local_boot_a) == 0 || is.null(cov_local_boot_a)) {
+    formula_ps_local_boot <- as.formula("A ~ 1")
+  } else {
+    formula_ps_local_boot <- as.formula(paste("A ~", paste(cov_local_boot_a, collapse = " + ")))
+  }
+
+  #OR
+  model_or_local_boot <- glm(formula_or_local_boot, data = sample_df, family = binomial)
+  
+    #create fake datasets
+  sample_df_a0 <- sample_df
+  sample_df_a0$A <- factor(0, levels = levels(sample_df$A))
+  sample_df_a1 <- sample_df
+  sample_df_a1$A <- factor(1, levels = levels(sample_df$A))
+
+
+  sample_df_prob_Y_if_A1 <- predict(model_or_local_boot, newdata = sample_df_a1, type = "response")
+  EY_a1_or_sample_df <- mean(sample_df_prob_Y_if_A1)
+
+  sample_df_prob_Y_if_A0 <- predict(model_or_local_boot, newdata = sample_df_a0, type = "response")
+  EY_a0_or_sample_df <- mean(sample_df_prob_Y_if_A0)
+  
+  ace_or_sample_df <- EY_a1_or_sample_df - EY_a0_or_sample_df
+  
+  # ipw
+  model_ps_local_boot <- glm(formula_ps_local_boot, data = sample_df, family = binomial)
+  sample_df$ps_sample_df <- predict(model_ps_local_boot, type = "response")
+  sample_df$ps_sample_df_clamped <- pmax(pmin(sample_df$ps_sample_df, 0.9999), 0.0001)
+  sample_df$weights_sample_df <- ifelse(sample_df$A == 1, 1/sample_df$ps_sample_df_clamped, 1/(1-sample_df$ps_sample_df_clamped))
+
+  a0_group_sample_df <- sample_df[sample_df$A== 0, ]
+  a1_group_sample_df <- sample_df[sample_df$A== 1, ]
+
+  EY_a0_ipw_sample_df <- sum(as.numeric(as.character(a0_group_sample_df$Y)) * a0_group_sample_df$weights_sample_df) / sum(a0_group_sample_df$weights_sample_df)
+  EY_a1_ipw_sample_df <- sum(as.numeric(as.character(a1_group_sample_df$Y)) * a1_group_sample_df$weights_sample_df) / sum(a1_group_sample_df$weights_sample_df) 
+  
+  ace_ipw_sample_df <- EY_a1_ipw_sample_df - EY_a0_ipw_sample_df
+  
+  return(list(ace_or = ace_or_sample_df, 
+       ace_ipw = ace_ipw_sample_df, 
+       blanket = local_y_boot,
+       blanket_a = local_a_boot
+       ))
+}, simplify=FALSE)
+```
+
+
+
+```{r bootstrap variance and bias for local variables}
+orig_ace_local_var <- c(ace_or_local, ace_ipw_local)
+
+#extract ACE values
+boot_aces_or_local  <- unlist(lapply(bootstrap_results_local, function(x) x$ace_or))
+boot_aces_ipw_local <- unlist(lapply(bootstrap_results_local, function(x) x$ace_ipw))
+
+#extract markov blanket
+boot_blankets_local <- lapply(bootstrap_results_local, function(x) x$blanket)
+boot_blankets_local_a <- lapply(bootstrap_results_local, function(x) x$blanket_a)
+
+
+# convert to dataframe
+boot_df_local_var <- data.frame(
+  Regression = boot_aces_or_local,
+  IPW = boot_aces_ipw_local
+)
+colnames(boot_df_local_var) <- c("Regression", "IPW")
+
+# Calculate Metrics
+metrics_local_var <- data.frame(
+  Method = c("Regression", "IPW"),
+  Original_ACE = orig_ace_local_var,
+  Bootstrap_ACE = c(mean(boot_df_local_var$Regression), mean(boot_df_local_var$IPW)),
+  Standard_Error = c(sd(boot_df_local_var$Regression), sd(boot_df_local_var$IPW))
+)
+
+# Calculate Bias
+metrics_local_var$Bootstrap_Bias <- metrics_local_var$Bootstrap_ACE - metrics_local_var$Original_ACE
+print(metrics_local_var)
+```
+
+```{r}
+boot_blankets_local_unlisted <- unlist(boot_blankets_local)
+
+boot_mb_stability_local <- table(boot_blankets_local_unlisted) / bootstrap_sample_size
+print("Selection Frequency for Y's Markov Blanket:")
+print(sort(boot_mb_stability_local, decreasing = TRUE))
+```
+
+```{r}
+boot_blankets_local_unlisted_a <- unlist(boot_blankets_local_a)
+
+boot_mb_stability_local_a <- table(boot_blankets_local_unlisted_a) / bootstrap_sample_size
+print("Selection Frequency for A's Markov Blanket:")
+print(sort(boot_mb_stability_local_a, decreasing = TRUE))
+```
+
+# 9 end Note: compare the ACEs for all of the runs at the end!! maybe do a big table to discuss.
+
+```{r final ACE comparisons}
+# Define a helper function to label and combine
+combine_metrics <- function(df, selection_name, data_type) {
+  df %>%  
+    mutate(
+      Selection = selection_name,
+      Rel_Bias_Pct = ((Bootstrap_ACE - Original_ACE) / Original_ACE) * 100
+      # Bias_SE_Ratio = abs(Bootstrap_ACE - Original_ACE) / Standard_Error
+    ) %>%
+    mutate(across(where(is.numeric), ~round(.x, 4))) %>%
+    mutate(Rel_Bias_Pct = round(Rel_Bias_Pct, 2)) %>%
+    select(Selection, Method, Original_ACE, Bootstrap_ACE, everything())
+}
+
+# Create a master table
+all_metrics_master <- bind_rows(
+  combine_metrics(metrics_all_var, "All Variables"),
+  combine_metrics(metrics_lasso, "Lasso"),
+  combine_metrics(metrics_pc_var, "PC, Limited Cov",),
+  combine_metrics(metrics_rank_pc_var, "Rank PC"),
+  combine_metrics(metrics_local_var, "IAMB")
+  # combine_metrics(metrics_local_var_blacklist, "IAMB with Blacklist")
+)
+
+print(all_metrics_master)
+```
+
+```{r}
+
+# 1. Prepare the data (Rounding and Renaming)
+table_data <- all_metrics_master %>%
+  mutate(
+    # Match the decimal logic from your gt code
+    Original_ACE = round(Original_ACE, 4),
+    Bootstrap_ACE = round(Bootstrap_ACE, 4),
+    Standard_Error = round(Standard_Error, 4),
+    Bootstrap_Bias = round(Bootstrap_Bias, 4),
+    Rel_Bias_Pct = paste0(round(Rel_Bias_Pct, 1), "%") # Format as string for ggplot
+    # Bias_SE_Ratio = round(Bias_SE_Ratio, 3)
+  ) %>%
+  # Rename columns to match your desired header
+  rename(
+    `Estimation Method` = Method,
+    `Original ACE` = Original_ACE,
+    `Bootstrap Mean ACE` = Bootstrap_ACE,
+    `Bootstrap Standard Error (SE)` = Standard_Error,
+    `Bootstrap Bias` = Bootstrap_Bias,
+    `Relative Bootstrap Bias (%)` = Rel_Bias_Pct,
+    # `Bootstrap Bias-to-SE Ratio` = Bias_SE_Ratio
+  )
+
+# 2. Create the table graphic
+# We use 'ttheme_minimal' or 'ttheme_clean' for a thesis look
+tab_plot <- ggtexttable(table_data, 
+                        rows = NULL, 
+                        theme = ttheme("classic", base_size = 10)) %>%
+            tab_add_title(text = "ACE Estimation Comparison Across Variable Selection Methods", 
+                          face = "bold", padding = unit(1.5, "line"))
+
+# 3. Save as PNG using ggsave (No Chrome needed!)
+ggsave(filename = "OUTPUT_IMAGES_FROM_ANALYSIS_V5/ACE_Comparison_Table.png", 
+       plot = tab_plot, 
+       width = 12, height = 8, dpi = 300, bg = "white")
+
+# View it in RStudio
+print(tab_plot)
+
+# # 1. Create the professional gt table object
+# final_table_img <- all_metrics_master %>% 
+#   gt(groupname_col = "Selection") %>% # Group by Selection method
+  
+#   # Add title and subtitle for your thesis
+#   tab_header(
+#     title = md("ACE Estimation Comparison Across Variable Selection Methods"),
+#   ) %>%
+  
+#   # Format column labels clearly
+#   cols_label(
+#     Method = md("Estimation Method"),
+#     Original_ACE = md("Original ACE"),
+#     Bootstrap_ACE = md("Bootstrap Mean ACE"),
+#     Standard_Error = md("Bootstrap Standard Error (SE)"),
+#     Rel_Bias_Pct = md("Relative Bootstrap Bias (%)"),
+#     Bias_SE_Ratio = md("Bootstrap Bias-to-SE Ratio"),
+#     Bootstrap_Bias = md("Bootstrap Bias")
+#   ) %>%
+  
+#   # Add formatting for scientific precision and percentages
+#   fmt_number(columns = c(Original_ACE, Bootstrap_ACE, Standard_Error), decimals = 4) %>%
+#   fmt_percent(columns = Rel_Bias_Pct, decimals = 1, scale_values=FALSE) %>%
+#   fmt_number(columns = Bias_SE_Ratio, decimals = 3) %>%
+  
+#   # Choose a clean theme (like minimal or pff)
+#   gt_theme_pff()
+
+# # 2. Save the table as an image (PNG)
+# # Ensure webshot2 is installed for this step
+# gtsave(final_table_img, filename = "OUTPUT_IMAGES_FROM_ANALYSIS_V5/ACE_Comparison_Table.png")
+
+# # Print the table to the Viewer to see it immediately
+# final_table_img
+```
+
+```{r final model comparisons}
+print("Formula for ordinary regression model for all variables:")
+print(formula_or_all_var)
+print("Formula for IPW model for all variables:")
+print(formula_ps_all_var)
+
+print("Formula for ordinary regression model for lasso:")
+print("It gets cut off so I just output the covariates instead of a full formula as well")
+print(formula_lasso_or_text)
+print(formula_lasso_or_text_anotherver)
+print("Formula for IPW model for lasso variable selection:")
+print("It gets cut off so I just output the covariates instead of a full formula as well")
+print(formula_lasso_ps_text)
+print(formula_lasso_ps_text_anotherver)
+
+print("Formula for ordinary regression model for PC, limiting to most recent month:")
+print(formula_or_pc)
+print("Formula for IPW for PC, limiting to most recent month:")
+print(formula_ps_pc_var)
+
+print("Formula for ordinary regression model for Rank PC:")
+print(formula_or_rank_pc)
+print("Formula for IPW for Rank PC:")
+print(formula_ps_rank_pc_var)
+
+print("Formula for ordinary regression model for local discovery (INTER_IAMB)")
+print(formula_or_local)
+print("formula for IPW for local discovery (INTER_IAMB)")
+print(formula_ps_local)
+```
+
+
+```{r plot all ACEs}
+
+
+# Calculate 95% Confidence Intervals using the Normal Approximation: ACE +/- 1.96 * SE
+all_metrics_master <- all_metrics_master %>%
+ mutate(
+    CI_lower = Bootstrap_ACE - (1.96 * Standard_Error),
+    CI_upper = Bootstrap_ACE + (1.96 * Standard_Error)
+  )
+ace_se_graph <- ggplot(all_metrics_master, aes(x = Selection, y = Standard_Error, fill = Method)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  scale_fill_manual(values = c("Regression" = "#2c7fb8", "IPW" = "#feb24c")) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Comparison of Model Variance (Standard Error)",
+       y = "Standard Error of ACE", x = "Variable Selection Method")+
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 8),    # Slightly smaller text to save space
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.key.size = unit(0.4, "cm")        # Smaller keys to fit more on screen
+  )
+ggsave("OUTPUT_IMAGES_FROM_ANALYSIS_V5/ace_standard_errors.png", plot = ace_se_graph, width = 8, height = 6, dpi = 300)
+print(ace_se_graph)
+
+ace_ci_graph <- ggplot(all_metrics_master, aes(x = Selection, y = Bootstrap_ACE, color = Method, group = Method)) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), 
+                position = position_dodge(width = 0.9), 
+                width = 0.5, alpha = 0.6) +
+  geom_point(aes(y = Bootstrap_ACE), 
+             position = position_dodge(width = 0.9), 
+             size = 3) +
+  geom_point(aes(y = Original_ACE), 
+             shape = 4, 
+             position = position_dodge(width = 0.9), 
+             size = 4, stroke = 1.2) +
+  coord_flip() +
+  theme_minimal() +
+  scale_color_manual(values = c("Regression" = "#2c7fb8", "IPW" = "#feb24c")) +
+  labs(title = "Average Causal Effect (ACE) Comparisons",
+       subtitle = "Dots (•) = Bootstrap Mean ACE (w/ 95% CI) | Crosses (x) = Original Estimate of ACE",
+       y = "Estimated ACE (Effect on Default Probability)",
+       x = "Variable Selection Strategy",
+       color = "Method",
+       shape = "Data Format") +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_line(color = "grey90") # Makes the rows easier to follow
+  )
+
+ggsave("OUTPUT_IMAGES_FROM_ANALYSIS_V5/ace_confidence_intervals.png", plot = ace_ci_graph, width = 8, height = 6, dpi = 300)
+print(ace_ci_graph)
+```

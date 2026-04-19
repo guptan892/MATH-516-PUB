@@ -1,0 +1,311 @@
+---
+title: "Causal discovery as a method to determine Average Causal Effect of Payment Protection Plans on defaulting"
+author: "Zhuo Diao, Nikita Gupta "
+date: "**April 3, 2026**"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: no
+always_allow_html: true
+urlcolor: blue
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+# Abstract {-}
+
+This study evaluates the causal effect of Payment Protection Plan (PPP) enrollment on credit card default risk using a customer-level dataset of demographic and financial variables. A key challenge is the presence of confounding, as customers who enroll in PPPs are likely already at higher risk of default. To address this, we estimate the Average Causal Effect (ACE) using two complementary approaches: Outcome Regression (OR) and Inverse Probability Weighting (IPW). A central focus of the analysis is the selection of an appropriate adjustment set of covariates. We compare traditional variable selection using LASSO with causal discovery methods, including PC, Rank PC, and Rank-based Interleaved IAMB, which aim to identify Markov Blankets around the treatment and outcome variables. To ensure robustness, a bootstrap procedure is employed to assess estimation stability and bias. 
+
+Results show that causal discovery methods yield more parsimonious and stable models compared to LASSO, particularly in the presence of highly correlated and non-Gaussian financial variables. Across methods, PPP enrollment is consistently associated with an increase in default probability of approximately 10% to 30%, a counter-intuitive finding given the program’s intended purpose. This suggests potential structural issues in the PPP design or the presence of unobserved confounders.
+
+# Introduction
+
+Payment Protection Plans (PPPs) are often marketed as a stabilizing mechanism for customers facing financial hardship, allowing them to pause repayments without accruing interest. However, evaluating the actual effectiveness of these plans in preventing credit default is complicated by the characteristics of customers. Because enrollment is voluntary, customers who opt into a PPP often possess higher baseline risk profiles than those who do not. Consequently, a simple comparison of default rates between the two groups yields a biased estimate that conflates the plan's effect with the customer's pre-existing financial distress.
+
+This report addresses this challenge by combining causal inference techniques with modern variable selection and causal discovery methods. Specifically, we estimate the Average Causal Effect (ACE) of PPP enrollment on default using both Outcome Regression (OR) and Inverse Probability Weighting (IPW). A key component of this process is identifying an appropriate adjustment set of covariates. We compare conventional approaches, such as LASSO, with constraint-based causal discovery algorithms, including PC and Interleaved IAMB, as well as their rank-based variants designed to handle non-Gaussian and highly skewed financial data.
+
+This report first described the dataset to be used and discussed the Exploratory Data Analysis performed, examining data quality, variable distributions, and initial relationships between treatment, outcome, and covariates to motivate the need for causal adjustment. It then outlines the statistical methods, detailing the OR and IPW estimators, variable selection strategies, and causal discovery algorithms. Section 5 Results details the adjustment sets discovered by each method and provides a comparative analysis of the resulting ACE estimates, utilizing bootstrap resampling to quantify stability and bias. Furthermore, it explores the sensitivity of these models to varying significance levels ($\alpha$) and evaluates the structural impact of mandating the inclusion of the treatment variable ($A$) within the outcome regression framework. Finally, Section 6 Discussion interprets the findings, evaluates the implications of PPP enrollment on default risk, and highlights limitations and potential directions for future research.
+
+# Data Description
+A customer-level dataset (low2076upd.csv) on credit card repayment behaviors is analysed to evaluate the effectiveness of Payment Protection Plans (PPPs) in affecting the risk of credit default. The dataset contains demographic and historical financial records over a six-month period. For the purpose of causal analysis, the variables are categorized into the outcome, the treatment, and a set of covariates.
+
+## Primary Variables of Interest
+Outcome (Y) is a binary indicator of credit default, capturing whether a customer missed their next scheduled credit card payment (1 = default, 0 = not default); Treatment (A) is a binary indicator representing a customer's enrollment in a Payment Protection Plan (1 = enrolled, 0 = not enrolled). The PPP is designed to allow customers facing financial hardship to temporarily pause repayments without incurring interest.
+
+## Covariates
+Because customers who willingly enroll in a PPP may already be at a higher risk of defaulting, a direct risk comparison is biased. To determine the true Average Causal Effect (ACE), we must adjust for a set of confounding factors ($L$), to compare similar customers. Determining the correct adjustment set $L$ is crucial for unbiased ACE identification. The dataset provides the following candidate covariates to construct $L$: demographics attributes including AGE, SEX and EDUCATION; credit limit ($LIMIT\_BAL$); monthly repayment status indicators ($PAY\_0$ to $PAY\_6$) tracking the repayment punctuality for the previous six months; monthly credit card bill statements ($BILL\_AMT1$ to $BILL\_AMT6$) for the previous six months; monthly bill payments ($PAY\_AMT1$ to $PAY\_AMT6$) recording the actual amount paid by the customer in each of the previous six months. Note the variables ending in $0$ ($PAY$) or $1$ ($PAY\_AMT, BILL\_AMT$) are the most recent month of data, and higher numbers reflect older months. Additionally, the variable $PAY\_1$ does not exist; $PAY\_0$ contains the data reflective of the month that $PAY\_AMT1$ and $BILL\_AMT1$ contain.
+
+# Exploratory Data Analysis
+We first checked there is no missing value in the dataset and explicitly converted categorical variables ($Y, A, SEX, EDUCATION$, $PAY\_0$ to $PAY\_6$) to factor type.
+
+## Univariate Analysis: Marginal Distributions
+The outcome variable Y (default) shows class imbalance, with 31.2% of customers missing their payment and 68.8% successfully paying. Participation in the PPP is relatively balanced, with 44.2% of the sample enrolled and 55.8% not enrolled. The distributions of continuous financial variables (plots can be found in Appendix A.), specifically the monthly credit card bill statements ($BILL\_AMT1$ to $BILL\_AMT6$) and payment amounts ($PAY\_AMT1$ to $PAY\_AMT6$), are heavily right-skewed. Furthermore, the payment amount variables exhibit extreme zero-inflation, reflecting a large point mass of customers making no payments or holding zero balances. 
+
+## Bivariate Analysis: Motivate Causal Analysis
+We first examined the naive, unadjusted relationship between PPP enrollment (A) and credit default (Y): default rate for PPP Enrolled is 41.6% and default rate for PPP Not Enrolled is 22.9%. This means that, without adjusting for any confounders, enrolling in the PPP is associated with an around 18.7% increase in the probability of defaulting. 
+
+However, customers who willingly choose to enroll in PPP are likely already experiencing financial distress, meaning they possess a higher baseline risk of missing a payment. To investigate this further, we visualized the distributions of our continuous and categorical covariates across both treatment groups ($A$) and outcome groups ($Y$) (the corresponding boxplots and stacked bar charts can be found in Appendix A.). Variables such as credit limit, monthly repayments and repayment status fluctuate depending on whether a customer is enrolled in the PPP and whether they defaulted. Because these demographic and historical financial variables simultaneously influence a customer's likelihood to enroll in the PPP and their likelihood to default, they act as confounders. Therefore, to isolate the true causal effect of the PPP without bias, it is crucial to properly adjust for a correct set of these covariates, $L$, ensuring that we compare customers with similar underlying risk profiles.
+
+## Correlation Analysis
+To understand the relationships between the continuous covariates and assess potential modeling challenges, we computed both Pearson and Spearman correlation matrices, shown in figure \@ref(fig:correlation-graph). We notice that there is severe positive correlation among the historical bill amounts. For instance, $BILL\_AMT1$ and $BILL\_AMT2$ share a Pearson correlation of 0.93. While Pearson is optimized for capturing perfectly linear relationships, Spearman is utilized due to its robustness to the extreme outliers and zero-inflation as present in the bill amounts and payment amounts, because it evaluates ranks rather than raw magnitudes. For example, the correlation between $BILL\_AMT1$ and $PAY\_AMT1$ is only 0.13 under Pearson (distorted by outliers) but rises to a moderate 0.47 under Spearman, reflecting the monotonic trend that higher bills generally lead to higher payments.
+
+```{r correlation-graph, echo=FALSE, fig.cap="Pearson and Spearman correlation of covariates", out.width="49%", fig.show='hold', fig.align='center'}
+images <- c("OUTPUT_IMAGES_EDA/pearson_correlation.png", "OUTPUT_IMAGES_EDA/spearman_correlation.png")
+knitr::include_graphics(images)
+```
+
+The high correlation, particularly among the historical bill amounts, poses a problem for standard logistic regression. This redundancy makes it difficult for a naive logistic regression model to distinguish individual feature effects, leading to inflated standard errors. This inherent characteristic of the dataset motivates the application of variable selection methods, such as LASSO, and causal discovery algorithms to handle this feature redundancy.
+
+# Statistical Description of the Methods
+
+## Approaches to Determine Average Causal Effect 
+
+Two approaches were used to determine the causal effect of the treatment variable ($A$) on the outcome variable ($Y$). Asymptotically, both approaches should lead to the same estimate of the average causal effect (ACE). However in finite samples, they may yield different estimates due to finite sample bias.
+
+### Outcome Regression (OR)
+
+Outcome regression addresses confounding by modeling the relationship between the outcome variable ($Y$) and the treatment variable ($A$), adjusting for confounders ($L$). 
+
+First, the conditional expectation is estimated with a parametric regression model: $\mathbb{E}[Y \mid A=a, L=l] = g(A, L; \theta)$. A binomial generalized linear model (GLM) is used because the outcome $Y$ is a binary variable. The model is fitted with the response variable $Y$, and the predictors are the treatment variable $A$ and the confounders $L$ (which are selected using various variable selection methods). This step estimates the vector of parameters $\theta$ that best fits the data.
+
+Theoretically, the expected potential outcome is defined as:
+$\mathbb{E}[Y^{a}]=\sum_{l}\mathbb{E}[Y|A=a,L=l]P(L=l)$
+
+In our computation, we do not know the true population distribution $P(L=l)$. However, we can estimate this using the empirical distribution of our sample. By assigning a uniform probability of $\frac{1}{n}$ to each specific person's covariate profile $L_i$ appearing in the dataset (where $n$ is the total number of customers), we use the following empirical estimator:
+$$\hat{\mathbb{E}}[Y^a] = \frac{1}{n} \sum_{i=1}^{n} \hat{\mathbb{E}}[Y|A=a, L=L_i]$$
+
+The predicted probabilities of the outcome ($\hat{\mathbb{E}}[Y|A=a, L=L_i]$) for each individual are then calculated twice using the fitted GLM: once under the assumption that everyone is treated ($A=1$) and once under control ($A=0$), explicitly overriding their true observed treatment status. These predictions are then averaged across the $n$ individuals to obtain the expected potential outcomes, ensuring that the confounders are held constant.
+
+The Average Causal Effect (ACE) is the difference between these two expectations, calculated as $ACE = \hat{\mathbb{E}}[Y^1] - \hat{\mathbb{E}}[Y^0]$, representing the average causal effect of compulsory PPP enrollment on the probability of defaulting.
+
+### Inverse Probability Weighting (IPW)
+
+Unlike outcome regression, Inverse Probability Weighting (IPW) addresses confounding by modeling the likelihood of treatment assignment ($A$) rather than the outcome ($Y$). IPW predicts the propensity score, the conditional probability of receiving the treatment given the confounders, $P(A=1 \mid L)$, using a binomial generalized linear model defined as $P(A=1 \mid L) = f(L; \beta)$.
+
+For each individual, a weight is calculated based on the inverse of their propensity score. For individuals enrolled in the PPP ($A=1$), the weight is defined as $\frac{1}{\hat{P}(A=1 \mid L)}$; for those not enrolled ($A=0$), the weight is $\frac{1}{1-\hat{P}(A=1 \mid L)}$. In finite samples, particularly when the model is fitted with many covariates, estimated propensity scores can sometimes approach exactly $0$ or $1$. This leads to extreme weights that can severely destabilize the causal effect estimate. To prevent division-by-zero errors and bound the variance, the estimated propensity scores were explicitly clamped to the interval $[0.0001, 0.9999]$ prior to the final weight calculation. These applied weights balance the distribution of confounders across the treatment groups, creating a pseudo-population where the treatment assignment ($A$) is rendered independent of the confounding covariates ($L$).
+
+Theoretically, the expected potential outcome for each treatment level $a$ is defined as the weighted average of the observed outcomes:
+$$\mathbb{E}[Y^a] = \mathbb{E}[W(a,L)Y] = \mathbb{E}\left[\frac{Y \cdot I(A=a)}{P(A=a \mid L)}\right]$$
+In practice, to compute this empirically from our sample, we utilized the Hajek estimator (Hernán & Robins, 2025, p. 160). While the standard theoretical formulation above (often called the Horvitz-Thompson estimator) simply scales the outcomes by their weights, it can suffer from high variance in finite samples if the weights do not sum exactly to the sample size. The Hajek estimator resolves this by explicitly normalizing the weights within each treatment group, providing a much more statistically efficient and stable estimate:
+$$\hat{\mathbb{E}}[Y^a] = \frac{\sum_{i=1}^{n} I(A_i = a) Y_i W_i}{\sum_{i=1}^{n} I(A_i = a) W_i}$$
+The Average Causal Effect (ACE) is then derived from the difference between these two normalized, weighted expectations: 
+$ACE = \hat{\mathbb{E}}[Y^1] - \hat{\mathbb{E}}[Y^0]$.
+
+## Variable Selection 
+
+The logistic regression models defined above as $g(A, L; \theta)$ and $f(L; \beta)$ were used to estimate the conditional outcomes and the propensity scores, respectively. The variable selection methods used to determine the correct adjustment set of covariates ($L$) for these models are as follows. Note that $A$ is always included in the Outcome Regression equation for $Y$ regardless of what the variable selection below results in (as mentioned in the Outcome Regression section above, it models the relationship between the outcome variable ($Y$) and the treatment variable ($A$), adjusting for confounders ($L$)). Without mandating this relationship, methods resulting in sparse models would have ACEs of 0, starkly increasing the standard error and not answering the underlying question (with the OR method) of what the impact of enrolling in a payment plan is on default. 
+
+### All Variables (No Selection)
+
+All variables in the dataset are included in the models, regardless of their relationship with the treatment or outcome. This method serves as a baseline for comparison.
+
+### LASSO
+
+$L_1$-penalized logistic regression (LASSO) was utilized to identify the most predictive covariates and filter out multicollinearity and redundant features. Standard 10-fold cross-validation was used to select the optimal penalization parameter ($\lambda$) that minimizes out-of-sample error. 
+
+## Causal Discovery Algorithms
+
+While LASSO selects covariates based purely on predictive power, which can inadvertently capture spurious associations, causal discovery algorithms attempt to uncover the underlying structural relationships within the data. Several causal discovery algorithms were employed, to identify the Markov Blanket around the target variables. 
+
+A complete Markov Blanket includes a node's parents, children, and spouses. While strictly adjusting for downstream nodes (children or spouses) can theoretically risk introducing over-adjustment or collider bias, we chose to retain the entire Markov Blanket as our adjustment set $L$. This decision was driven by the practical limitations of constraint-based causal discovery in finite samples: algorithms like PC are generally reliable at detecting edges but are unstable when orienting them, as the orientation phase relies on sensitive conditional independence tests to identify v-structures. Consequently, a true parent may be misclassified as a child. Using the full Markov Blanket provides a more robust feature selection strategy by preserving all direct neighbors and reducing the risk of omitting important confounders due to orientation errors.
+
+### PC algorithms
+
+The PC algorithm, a global constraint-based causal discovery method, was first considered to find the causal structure. The algorithm operates under three key assumptions: causal sufficiency (assuming no hidden or unobserved confounders act on the system), faithfulness (assuming conditional independencies in the data imply conditional independence in the graph), and the Markov condition (assuming a variable is conditionally independent of its non-descendants given its parents). Under the Markov condition, a node is conditionally independent of all other nodes in the network given its Markov Blanket.
+
+To build the causal graph, the algorithm begins with a fully connected undirected graph and iteratively performs conditional independence tests among all pairs of variables, removing edges when independencies are detected. Finally, it applies orientation rules (such as identifying v-structures) to orient the remaining edges, outputting a Completed Partially Directed Acyclic Graph that represents the Markov equivalence class.
+
+Standard mixed-type conditional independence tests, such as mixCItest (provided by the micd extension package for use with pcalg) and the default mixed tests in bnlearn, rely on the Conditional Gaussian network framework. This framework assumes that all continuous variables follow a normal distribution for every combination of the discrete variables, an assumption violated by the zero-inflated and right-skewed financial data in this project.
+
+### Rank-PC
+
+To handle the non-Gaussian nature of the data, the Rank PC algorithm was employed. Rank PC utilizes rank-based Spearman correlations to perform conditional independence tests, making the discovery process robust to non-Gaussian distributions.
+
+Rank transformation was first applied on the data in order to compute the Spearman rank correlation; all variables (both discrete and continuous) were converted into integer ranks. Conditional independence tests were then executed using Fisher's Z-transformation (via the gaussCItest function) on the resulting Spearman rank correlation matrix. This maps the empirical rank structures into a Gaussian Copula framework, which allows assessing the conditional independence of the latent dependency structures without requiring the raw, marginal distributions to be normally distributed.
+
+### Local Causal Discovery (Rank inter.iamb)
+
+To directly identify the adjustment set without the computational overhead of constructing the entire global graph, local causal discovery was performed to identify the Markov Blankets of the treatment ($A$) and outcome ($Y$). 
+
+Constraint-based local discovery algorithms, such as the Incremental Association Markov Blanket (IAMB) operate through two phases (Tsamardinos et al. 2003):
+
+**The Forward Inclusion Phase**: The algorithm begins with an empty set and iteratively adds variables that exhibit a strong statistical dependency with the target node based on conditional independence tests. This phase continues until no additional variables significantly increase the information about the target.
+
+**The Backward Elimination Phase**: Observational data often contain "false positives": variables that appear dependent but are actually d-separated by other members of the set. The backward phase performs subsequent conditional independence tests to prune these redundant variables. This ensures the final set contains only the smallest possible set of variables required to satisfy the Markov Condition.
+
+For this project, the Interleaved IAMB algorithm was selected. The interleaved variation was chosen because it conducts backward elimination iteratively during the forward-inclusion phase, rather than waiting until the end of the growth phase. This approach minimizes the size of the conditioning set at any given step, which is vital for preserving statistical power when conducting non-parametric tests in finite samples.
+
+Similarly to the Rank PC methodology, a Rank IAMB approach was utilized to bypass the parametric limitations of bnlearn's default Conditional Gaussian framework, which assumes all continuous variables are normally distributed. The algorithm was applied to the same rank-transformed dataset prepared for Rank PC. By specifying a linear correlation test (test = "cor"), the algorithm executed Fisher's Z-transformation on the resulting Spearman rank correlation matrix as in Rank PC.
+
+## Bootstrap
+
+Bootstrap is employed to quantify the structural uncertainty of the causal discovery phase and the estimation uncertainty of the resulting Average Causal Effect.
+The bootstrap procedure was executed using a resample-and-refit approach with $B = 1000$ iterations: for each iteration $b$, a bootstrap sample $D^*_b$ of size $n$ was generated by sampling with replacement from the original dataset; for every resample, the entire methodological pipeline specific to the chosen method was re-executed. Following the selection or discovery phase, the ACE was calculated for each resample using both Outcome Regression and IPW.
+The stability of each method was evaluated using the following metrics derived from the bootstrap distribution $\{\hat{\theta}^*_1, \hat{\theta}^*_2, \dots, \hat{\theta}^*_B\}$. 
+
+Let $\hat{\theta}_{orig}$ be the ACE from the original data and $\bar{\theta}^*$ be the bootstrap mean $$\bar{\theta}^* = \frac{1}{B} \sum_{b=1}^{B} \hat{\theta}^*_b$$
+
+Bootstrap Standard Error ($SE_{boot}$) measures the empirical spread of the ACE estimates across resamples: $$SE_{boot} = \sqrt{\frac{1}{B-1} \sum_{b=1}^{B} (\hat{\theta}^*_b - \bar{\theta}^*)^2}$$
+
+Bootstrap Bias quantifies the difference between the bootstrap average and the original estimate, indicating potential over-fitting or sensitivity in the discovery process: $$\text{Bias}_{boot} = \bar{\theta}^* - \hat{\theta}_{orig}$$
+
+Relative Bootstrap Bias expresses the bias as a percentage of the original effect size to allow for comparison across methods: $$\text{Relative Bias}_{boot} = \left( \frac{\text{Bias}_{boot}}{\hat{\theta}_{orig}} \right) \times 100\%$$
+
+# Results
+
+## Variables selected
+
+Note that although the below discussion may not include $A$ in the markov blanket of $Y$ and may include $Y$ in the markov blanket of $A$, $A$ is a mandatory covariate of the OR formulas, and $Y$ is never a covariate of the IPW formulas. For the PC (and Rank PC) methods, both a DAG on the full dataset (“full DAG”) and a “consensus DAG” that pulls in edges that occur in over 50% of bootstrap runs were created. The consensus DAG is primarily shown and discussed for stability purposes, although we mention the full DAGs.
+
+The Lasso method selected $Y \sim A1 + LIMIT\_BAL + EDUCATION2 + EDUCATION4 + AGE + PAY\_0-1 + PAY\_00 + PAY\_01 + PAY\_02 + PAY\_03 + PAY\_06 + PAY\_24 + PAY\_25 + PAY\_32 + PAY\_34 + PAY\_4-1 + PAY\_42 + PAY\_43 + PAY\_54 + PAY\_62 + BILL\_AMT5 + PAY\_AMT2 + PAY\_AMT3 + PAY\_AMT4 + PAY\_AMT6$; note that (for example) $PAY\_06$ means the value $6$ from the variable $PAY\_0$, or $PAY\_43$ means the value $3$ from $PAY\_4$. This implies historical payment amount and payment status in general is important, and that the most recent month’s payment status ($PAY\_0$) is fairly important, as several iterations of it are included ($PAY\_0-1, $PAY\_02$, $PAY\_03$, PAY\_06$). It also prioritizes historical $BILL\_AMT$ over the most recent. It also selected $A \sim SEX1 + EDUCATION3 + EDUCATION5 + AGE + PAY\_05 + PAY\_AMT6$, implying that $AGE$ and $EDUCATION$ are consistently important to the algorithm. 
+
+The initial implementation of the PC algorithm using all available covariates resulted in a completely isolated $Y$ for both the full DAG and consensus DAG, with $A$’s markov blanket consisting of $AGE$ and $LIMIT\_BAL$ in the consensus DAG. This lack of connectivity is likely due to a significant loss of statistical power during conditional independence testing, where the algorithm assesses the dependency of continuous variables within every possible combination of discrete variable levels. In our finite sample, this resulted in "small buckets" of data that were insufficient to reject the null hypothesis of independence, leading the algorithm to erroneously delete edges.
+
+
+```{r consensus-dag-pc-limited-cov, echo=FALSE, fig.cap="Consensus DAG (edges included if they are in over 50% of the bootstraps) for the PC with limited covariates model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/consensus_dag_pc_bootstrap_limitedcov.png")
+```
+
+We hypothesized that reducing the number of factors from categorical variables could help the PC method identify significant relationships, and thus ran a “PC with Limited Covariates” model which only kept the most recent month’s temporal data and removed the other historical variables (for $PAY\_{\#}$, $PAY\_AMT\_{\#}$, and $BILL\_AMT\_{\#}$, kept e.g. $PAY\_0$ and removed the other $PAY\_{\#}$ variables). This adjustment successfully identified a robust core structure (figure @ref(fig:consensus-dag-pc-limited-cov)), with $PAY\_0$ and $A$ appearing in $Y$’s Markov Blanket in 99% and 95% of bootstrap iterations, respectively. However, while this confirmed that the algorithm could detect primary drivers in a reduced feature space, the model remained limited by its inability to incorporate the full set of potential confounders without returning to the "small buckets" problem.
+
+To move beyond a restricted covariate set and address the fundamental mismatch between the Conditional Gaussian assumptions and our skewed financial data, Rank PC was employed, which “ranks” both the categorical and numerical variables. This is generally fine for the categorical variables examined here, as variables like $EDUCATION$ and $PAY\_0$ have a certain order (with graduate > undergraduate > etc, or delayed 6 months > delayed 5 months > … > on time, etc).
+
+```{r consensus-dag-rank-pc, echo=FALSE, fig.cap="Consensus DAG (edges included if they are in over 50% of the bootstraps) for the Rank PC model.", out.width="75%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/consensus_dag_rank_pc_bootstrap.png")
+```
+
+Rank PC’s consensus DAG is shown in figure \@ref(fig:consensus-dag-rank-pc). The markov blanket of $Y$ contains $PAY\_0$ and $A$ (like the PC with Limited Covariates method), and the markov blanket of $A$ contains $AGE$, $EDUCATION$, $SEX$,  and $LIMIT\_BAL$. The directions are counter-intuitive, with $Y$ causing $A$ although $Y$ should never be a parent, and $A$ causing demographic variables like $AGE, EDUCATION, SEX$, which should not be children of any other variables as they are demographics and cannot be caused by financial status. For $A$ (and the IPW method), this means that $SEX$ and $LIMIT\_BAL$ (current spouses) are pulled into the markov blanket and $PAY\_0$ (parent of $Y$) is not. Excluding those counter-intuitive relationships, the resulting markov blanket has some overlap with the PC with Limited Covariates method ($PAY\_0, EDUCATION$), and the PC with All Covariates method ($AGE$). This is further supported by the fact that $Y$ and $AGE$ appear in A’s markov blanket for over 95% of bootstraps and $EDUCATION$ appears 63% of the time, but $LIMIT\_BAL$ and $SEX$ appear only 21% and 7% of the time, respectively. 
+
+Local discovery (utilizing the Inter-IAMB method for variable selection) does not result in a DAG, as the method only finds the variables in the markov blanket of $Y / A$ for OR / IPW respectively. The resulting markov blanket from the OR on the full dataset contains the variables $A, PAY\_0, PAY\_2, PAY\_3, PAY\_AMT2$, which are included 99%, 99%, 37%, 63%, and 24% of the time in the bootstrap runs respectively. The markov blanket from IPW on the full dataset contains the variable $EDUCATION, AGE, LIMIT\_BAL, Y$; $AGE$ (100%) and $EDUCATION$ (86%) appear frequently, but $LIMIT\_BAL$ only appears 26% of the time in the bootstrapped runs. 
+
+To summarize, the “All Variables” and Lasso methods result in larger models that include older historical payment and bill data, while the causal variable selection methods create more parsimonious models. The initial implementation of the PC method was too restrictive for the full dataset due to finite sample constraints. While the "PC with Limited Covariates" model identified the primary drivers, it remained restricted by the need to exclude potential confounders to maintain statistical power. Overall, the Rank PC and Rank IAMB approaches yielded more intuitive and stable Markov Blankets; by utilizing rank-transformed data, these methods bypassed the limitations of the Conditional Gaussian framework and proved robust to the skewed distributions and outliers inherent in the financial dataset.
+
+
+## ACE estimates
+
+```{r ace-table, echo=FALSE}
+# Create a 1-cell table containing the LaTeX image code
+image_df <- data.frame(
+  content = "\\includegraphics[width=1\\linewidth, trim=0cm 4cm 0cm 4cm, clip]{OUTPUT_IMAGES_FROM_ANALYSIS_V6/ACE_Comparison_Table.png}"
+)
+
+# Render it as a real table
+knitr::kable(
+  image_df, 
+  escape = FALSE,    # Allows the image to render inside the table
+  col.names = NULL,  # Hides the column header
+  caption = "Original ACE (estimate of ACE using the full dataset), Bootstrap Mean ACE (average ACE estimate from 1000 bootstrap runs), Bootstrap Standard Error, Bootstrap Bias (Bootstrap Mean ACE - Original ACE), and Relative Bootstrap Bias (Bootstrap Bias / Original ACE), segmented by ACE calculation method and variable selection method."
+)
+```
+
+The expected ACEs and confidence intervals for each method are quantified in table \@ref(tab:ace-table) and displayed in figure \@ref(fig:ace-confidence-interval). Note that the confidence intervals for all methods overlap and contain the original ACE estimates and mean bootstrapped ACE estimates. Additionally, the standard error itself is fairly similar (between 4-5%) for most methods (except All Variables, for the IPW method).
+
+The All Variables method has the largest confidence interval from the IPW method, and high relative bootstrap bias (ranging from 4-5%). This implies that the model overfits and is sensitive to outliers. It is especially severe in the IPW methodology as it starts to generate propensity scores extremely close to 0 or 1, thus creating extremely large weights and amplifying random noise. It is also noticeable in the OR methodology; although the confidence interval is not as large, the bootstrap bias is relatively high, suggesting it is sensitive to outliers. Finally, the expected ACE is somewhat different between the two methods (IPW & OR); although the confidence intervals overlap and the ACEs on the full dataset only have an absolute difference of 2%, they have a relative difference of 9% (table \@ref(tab:ace-table)). Again, this is due to IPW’s vulnerability to outliers.
+
+Similarly, the Lasso method has fairly high relative bootstrap bias from the IPW method (10%), although the OR method’s bootstrap bias is fairly small, and its overall standard errors are in-line with other methods. The confidence intervals from OR and IPW methodology overlap, but their ACEs (on the full dataset) are fairly different (15%), again due to IPW’s vulnerability to outliers.
+
+Rank PC’s method also results in fairly different (16%) ACEs (on the full dataset) between the OR and IPW methods. However, we hypothesize this is due to a different reason than the Lasso & All Variables methods: it is due to the non-overlapping markov blankets for $A$ and $Y$, due to the counter-intuitive directions on edges (as discussed above). $Y$ depends on $PAY\_0$, but $A$ excludes it solely due to the fact that the algorithm enforces a directed edge from $Y$ to $A$ and not vice-versa. Its overall bootstrap bias is comparatively low to the above two methods as well (<4%).
+
+In contrast, the PC (both with All and Limited Covariates) and IAMB variable selection methods have relatively similar ACEs for both the OR and IPW methods. These methods have sparse DAGs that result in extremely parsimonious models which prevent the extreme propensity weights that drove the relatively larger difference between OR and IPW ACEs that the other methods see, as well as the counter-intuitive relationship seen between $A$ and $Y$ for Rank PC. These methods consistently produced the lowest relative bootstrap bias ($<3\%$ for PC and $2.1\%$ for Rank IAMB OR), indicating high stability. While the Rank IAMB IPW model still shows a higher relative bootstrap bias ($6.7\%$) than its OR counterpart ($2.1\%$), it remains more stable than the Lasso IPW ($9.6\%$). This lower bootstrap bias across both Rank IAMB implementations indicates that the parsimony of the discovered Markov Blanket prevents the generation of extreme propensity weights that destabilized the less restrictive models.
+
+```{r ace-confidence-interval, echo=FALSE, fig.cap="Original estimate of ACE (using the full dataset), average ACE estimate from 1000 bootstrap runs, and bootstrap confidence intervals, segmented by ACE calculation method and variable selection method", out.width="100%", fig.align='center'}
+knitr::include_graphics("OUTPUT_IMAGES_FROM_ANALYSIS_V6/ace_confidence_intervals.png")
+```
+
+## Impact of significant levels
+
+We specified an $\alpha$ of 0.05 for the conditional independence tests performed to obtain the markov blankets in the PC and Local Discovery methods throughout this report. We also tested $\alpha$s of 0.01 and 0.10, to determine if the markov blankets change significantly. There is no change in the PC with Limited Covariates methods at either $\alpha$ level.
+
+Examining the consensus DAG, Rank PC’s markov blanket remains the same with $\alpha=0.10$, but $EDUCATION, SEX, LIMIT\_BAL$ are removed at the $0.01$ level. This further supports the discussion above: that the counter-intuitive directed edges often result in less significant variables being pulled into the blanket. However, the directed edges remain counter-intuitive, with $Y$ feeding into $A$, and $A$ feeding into $AGE$. 
+
+For Rank IAMB, at the 0.01 significance level, $Y$’s markov blanket consists of $A, PAY\_0$, and removes $PAY\_2, PAY\_3, PAY\_AMT2$; $A$’s markov blanket consists of $AGE, EDUCATION, Y$, removing $LIMIT\_BAL$. Only the variables included in markov blankets a majority of the time were included, as expected, removing correlated historical payment data from the markov blankets. At the 0.1 significance level, $SEX$ is brought into $A$’s markov blanket, and $PAY\_AMT1$ replaces $PAY\_AMT2$ in $Y$’s markov blanket on the full dataset (although it only appears in 23% of the bootstrapped markov blankets), implying that a 0.1 significance level is relatively weak and results in unstable markov blankets.
+
+It would be worthwhile to pursue further analysis into the $\alpha=0.01$ significance tests, if we believe that correlated historical payment values (from IAMB) or variables included due to counter-intuitive directed edges should be removed from the markov blankets.
+
+## Impact of mandating A
+
+Although we initially believed that mandating $A$ in $Y$’s formula for the OR helps properly ascertain the average causal effect of enrolling customers in a PPP (as otherwise the ACE from OR would be 0), we tested not mandating $A$ in all of the runs as well, resulting in table \@ref(tab:ace-table-optional-a). This results in much higher standard errors for the OR method for the PC with Limited Covariates and Lasso methods, as some bootstrap samples no longer have $A$ in the markov blanket of $Y$. Otherwise standard errors are fairly stable, although relative bootstrap bias increases slightly for some methods (Lasso, PC, and Rank PC). We hypothesized that mandating $A$ is helpful when the method does not stably select $A$, but overall has minimal impact on the analysis.
+
+```{r ace-table-optional-a, echo=FALSE}
+# Create a 1-cell table containing the LaTeX image code
+image_df <- data.frame(
+  content = "\\includegraphics[width=1\\linewidth, trim=0cm 4cm 0cm 4cm, clip]{ANALYSIS_TESTING_1ALPHA_2OPTA/OUTPUT_IMAGES_FROM_ANALYSIS_V5/ACE_Comparison_Table.png}"
+)
+
+# Render it as a real table
+knitr::kable(
+  image_df, 
+  escape = FALSE,    # Allows the image to render inside the table
+  col.names = NULL,  # Hides the column header
+  caption = "Original ACE (estimate of ACE using the full dataset), Bootstrap Mean ACE (average ACE estimate from 1000 bootstrap runs), Bootstrap Standard Error, Bootstrap Bias (Bootstrap Mean ACE - Original ACE), and Relative Bootstrap Bias (Bootstrap Bias / Original ACE), segmented by ACE calculation method and variable selection method. Does not mandate A be included in Y’s formula, for the Outcome Regression. Note PC reflects the “PC with Limited Covariates method."
+)
+```
+
+# Discussion
+
+## Implication of mandating enrolling in a payment plan
+
+The results from figure \@ref(fig:ace-confidence-interval) suggest that enrolling in a payment plan results in around a 10% to 30% increase in default. If the original goal of the payment plan was to assist struggling customers, this counter-intuitive result warrants deeper digging. For example, there may exist some confounding variables not included in the original dataset (ex. severe financial shocks such as job loss may cause customers to enroll, although they have no way to avoid default within the time period of the plan). Alternatively, this could simply be a structural flaw within the payment plan.
+
+## How does causal discovery reduce causal bias?
+
+In the dataset provided, $A$ (whether a customer is enrolled in a payment plan) is not randomly distributed. Customers who voluntarily choose to enroll in a PPP likely have different underlying profiles (including different payment histories, bill amounts, and demographics), which creates confounding bias when trying to understand the ACE of $A$. Simply including all variables and running a typical variable-selection model (like the lasso) with highly correlated variables (like temporal payment and billing data) can result in models that randomly choose which variable to retain. 
+
+Causal discovery systematically tests for conditional independence, adjusting only for the true confounders and structural relationships that it identifies. If limiting solely to parents, it avoids adjusting for colliders and mediators; however, we chose to include the entire markov blanket and not just parents in the regression due to the finite sample size. This introduces a risk of including downstream nodes, to avoid the risk of omitting a true, powerful confounder because the algorithm misoriented the edge.
+
+Overall, this results in a more parsimonious model than selected by other variable selection methods (e.g. lasso), reducing the variance and preventing overfitting which ensures that the IPW method does not overweight any observations.
+
+## Avenues for future analysis
+
+### Rank-Based vs. Parametric Methods
+
+The dataset examined contained mixed data types, and the continuous variables included did not have Gaussian distributions. Rank PC and Rank IAMB mitigated aspects of this, but further analysis into potential transformations of the variables to obtain normal distributions could be helpful to allow the usage of regular PC and IAMB methods. This would mitigate the limitations of the Rank PC/IAMB: that the rank transformation discards the exact scale and marginal distribution of the continuous covariates. While this makes the algorithm robust to outliers in financial variables like monthly bill amounts, it also means the algorithm evaluates purely monotonic relationships, stripping away information about the true magnitude of the numerical differences between observations
+
+### Artificial Ordinality
+
+While the rank-transformation strategy successfully bypassed the strict Conditional Gaussian assumptions required by standard constraint-based discovery algorithms, the direct numeric conversion of categorical variables introduced a structural limitation. Specifically, mapping nominal categories with no inherent logical order, such as the "Unknown" or "Other" classifications within the $EDUCATION$ variable, directly to numeric integers mathematically forces an artificial ordinality onto the data. When evaluated via Spearman rank correlation, the algorithm assumes a strict monotonic relationship across these unordered levels, which may result in the identification of spurious structural edges. Future iterations of this causal analysis can consider employing one-hot encoding for all multi-level nominal factors prior to the rank transformation. 
+
+### Blacklisting and Edge Orientation
+
+As discussed for Rank PC, the direction of edges has large implications for spouses – it could be useful to further investigate how utilizing blacklists for specific relationships (e.g. to maintain temporal order, ensure demographics are only parents, $Y$ is only a child) alters the resulting markov blankets. Some exploration of this was performed, but resulted in unintuitive outcomes that warranted further deep dives into the underlying blacklisting implementation (local discovery resulted in no markov blankets for both $Y$ and $A$, and PC method resulted in fairly empty markov blankets).
+
+# Conclusion
+
+This analysis tested utilizing the lasso and various causal discovery algorithms to identify confounders and create parsimonious models to predict the average causal effect of enrolling in a payment plan on default. Overall, causal discovery methods created more stable and parsimonious models than the lasso. The analysis revealed that enrolling increases a customer's probability of default by around 10% to 30%, contrary to the program's intended goal of providing financial relief. This counter-intuitive result suggests either a structural flaw of the payment plan, or the presence of confounding variables not included in the dataset; further analysis to both obtain additional data and examine different variations of causal discovery is recommended.
+
+# AI Usage
+
+We acknowledge that we utilized AI for assistance in graph creation, coding debugging and assistance, and report review for spelling, grammar, and flow.
+
+# References
+
+Andrews, R. M., Foraita, R., Didelez, V., & Witte, J. (2023). A practical guide to causal discovery with cohort data. arXiv. https://doi.org/10.48550/arXiv.2108.13395
+
+bnlearn - man/blacklist.html. (2026). Bnlearn.com. https://www.bnlearn.com/documentation/man/blacklist.html
+
+Hernán, M. A., & Robins, J. M. (2020). Causal Inference: What If. Chapman & Hall/CRC.
+
+Rdocumentation.org, 2018, www.rdocumentation.org/. Accessed 1 Apr. 2026.
+
+Tsamardinos, I., Aliferis, C., & Statnikov, A. (2003). Algorithms for Large Scale Markov Blanket Discovery. https://cdn.aaai.org/FLAIRS/2003/Flairs03-073.pdf
+
+
+# Appendix A: Exploratory Data Analysis plots
+
+```{r eda-1, echo=FALSE, fig.cap="Continuous Variables Distribution", out.width="49%", fig.show='hold', fig.align='center'}
+images <- c("OUTPUT_IMAGES_EDA/payment_amounts_distribution.png", "OUTPUT_IMAGES_EDA/bill_amounts_distribution.png")
+knitr::include_graphics(images)
+```
+
+```{r eda-2, echo=FALSE, fig.cap="Continuous Variables Distribution by Y and A", out.width="49%", fig.show='hold', fig.align='center'}
+images <- c("OUTPUT_IMAGES_EDA/continuous_by_default_log.png", "OUTPUT_IMAGES_EDA/continuous_by_treatment_log.png")
+knitr::include_graphics(images)
+```
+```{r eda-3, echo=FALSE, fig.cap="Y and A Distribution by Discrete Variables", out.width="49%", fig.show='hold', fig.align='center'}
+images <- c("OUTPUT_IMAGES_EDA/categorical_by_default_proportions.png", "OUTPUT_IMAGES_EDA/categorical_by_treatment_proportions.png")
+knitr::include_graphics(images)
+```
