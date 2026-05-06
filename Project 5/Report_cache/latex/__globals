@@ -1,0 +1,66 @@
+load libraries	
+load data	path
+examine dataset	dataset
+check NA etc	dataset
+edit dataset	dataset
+plot dataset	dataset	image_path	prices_long_master
+plot log data	dataset	image_path	prices_long_master
+create calib data	dataset	prices_long_master
+summ stats calib	calib_data
+acf	calib_data	image_path
+unnamed-chunk-1	lb_results
+fit argarch models	calib_data
+loop through models	portfolio_losses_calib
+examine all results	results_list
+unnamed-chunk-2	best_fit_bic
+unnamed-chunk-3	best_spec_bic
+check model fit bic	best_fit_bic
+unnamed-chunk-4	best_fit_bic
+check model fit lb test bic	get_lb	lags_to_test	std_residuals_bic
+check model fit diagnostic plots bic	best_k_bic	best_p_bic	best_q_bic	image_path	std_residuals_bic
+extreme value modelling mean residual life	image_path	std_residuals_bic
+look at u quantiles	z
+plot stability	image_path	u_max	u_min	z
+test different thresholds	z
+get mle estimates of gpd parameters	final_u	z
+use fpot	final_u	z
+get param ci	estimates	final_gpd_model_fpot	se
+plot gpd fitted	final_gpd_model_fpot
+build cdf	epsilon	final_u	sigma_u	z
+calculate quantiles	epsilon	final_u	n	n_u	sigma_u	u_quantile	z
+compute in-sample VAR	best_fit_bic	n	portfolio_losses_calib_date	z_95	z_99
+plot VAR violations insample	image_path	violations_95	violations_99
+unnamed-chunk-5	insample_VaR_95	insample_VaR_99
+biniomial test insample	n	violations_95	violations_99
+unnamed-chunk-6	dataset	n	prices_long_master
+rolling test	best_spec_bic	final_u	n_test	n_window	portfolio_losses_full	portfolio_losses_full_date	test_indices
+unnamed-chunk-7	portfolio_losses_full_date	rolling_VaR95	rolling_VaR99	test_indices
+backtesting	rolling_backtest_df
+biniomial test test	n_test_valid	v95_test	v99_test
+backtesting plots	image_path	rolling_backtest_df
+unnamed-chunk-8	rolling_backtest_df
+unnamed-chunk-9	n	n_test
+rolling test rolling u	best_spec_bic	n_test	n_window	portfolio_losses_full	portfolio_losses_full_date	test_indices	u_quantile
+unnamed-chunk-10	portfolio_losses_full_date	rolling_VaR95_rollingu	rolling_VaR99_rollingu	test_indices
+backtesting rolling u	rolling_backtest_df_rollingu
+unnamed-chunk-11	insample_VaR_95	insample_VaR_99	rolling_backtest_df_rollingu
+biniomial test test rolling u	n_test_valid_rollingu	v95_test_rollingu	v99_test_rollingu
+backtesting plots rolling u	image_path	rolling_backtest_df_rollingu
+rolling u sensitivity analysis	best_spec_bic	n_test	n_window	portfolio_losses_full	portfolio_losses_full_date	test_indices
+unnamed-chunk-12	backtest_summaries
+daily-log-losses-figure	prices_long_master_losses_plot
+summary-statistics-table	calib_data	n
+acf-correlogram-figure	calib_data
+ljung-box-table-initial	abs_losses	get_lb	losses
+parameter-estimates	params_table
+ljung-box-tests-post-argarch-table	lb_std_diagnostic_summary
+diagnostic-plots-post-argarch	std_residuals_bic
+mean-residual-life-plot	u_max	u_min	z
+gpd-calibration-data-plots	final_gpd_model
+insample-var-plot	calibration_results	violations_95	violations_99
+unnamed-chunk-13	calibration_results	insample_95_binom	insample_99_binom	violations_95	violations_99
+insample-var-exceed-tab	insample_backtest_summary
+outsample-var-plot	n_test_valid_rollingu	rolling_backtest_df_rollingu	v95_test_rollingu	v99_test_rollingu
+outsample-var-exceed-tab	n_test_valid_rollingu	rate_95_rollingu	rate_99_rollingu	test_95_binom_rollingu	test_99_binom_rollingu	v95_test_rollingu	v99_test_rollingu
+ar-garch-aic-bic-table	k	p	q	results_df
+u-sensitivity-analysis-table	final_summary_table

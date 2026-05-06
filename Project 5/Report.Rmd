@@ -1,0 +1,1911 @@
+---
+title: "Forecasting Value at Risk Using an AR-GARCH-GPD Framework"
+author: "Zhuo Diao, Nikita Gupta "
+date: "**May 4, 2026**"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    toc: no
+    extra_dependencies: 
+      caption: ["font=footnotesize", "justification=raggedright", "singlelinecheck=false"]
+always_allow_html: true
+urlcolor: blue
+editor_options: 
+  markdown: 
+    wrap: 72
+header-includes:
+  # - \usepackage{flafter} # Ensures floats don't appear before their reference
+  - \renewcommand{\floatpagefraction}{.9} # Allows more text on pages with images
+  - \usepackage{float}
+  # - \floatplacement{figure}{H}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage[table]{xcolor}
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "", prompt = TRUE, include = FALSE, cache=TRUE, autodep = TRUE)
+knitr::opts_chunk$set(fig.align="center") 
+```
+
+
+```{r load libraries}
+
+library(tidyverse) #installed tidyverse
+library(ggplot2)
+library(modelsummary)
+library(kableExtra)
+library(rugarch)
+library(dplyr)
+library(ismev)
+library(eva)
+library(evir)
+library(evd)
+
+
+# bootstrap_sample_size <- 1000
+
+set.seed(516)
+path <- getwd()
+image_path <- paste0(path, "/Old/Outputs")
+
+print(path)
+print(image_path)
+```
+
+```{r load data}
+data_path <- paste0(path, "/dataset_04.RData")
+
+load(data_path)
+```
+
+```{r examine dataset}
+glimpse(dataset)
+#list of 4:  
+#   prices (Date, HD, JNJ, PG)
+#   dates.calib (begin, end)
+#   dates.test (begin, end)
+#   weights(HD, JNJ, PG)
+```
+
+```{r check NA etc}
+colSums(is.na(dataset$prices)) #no NA
+colSums(is.na(dataset$dates.calib)) #no NA
+colSums(is.na(dataset$dates.test)) #no NA
+colSums(is.na(dataset$weights)) #no NA; #The portfolio is rebalanced daily: weights 𝑤 = (𝑤1, 𝑤2, 𝑤3) are fixed each day, so can leave these as constant
+```
+
+```{r edit dataset}
+# get prices data frame
+prices_df <- dataset$prices
+
+prices_df_master <- dataset$prices %>%
+  arrange(Date) %>% #order by date
+  mutate(
+    # Portfolio Price
+    PORTFOLIO = (dataset$weights[[1]] * HD) + 
+                (dataset$weights[[2]] * JNJ) + 
+                (dataset$weights[[3]] * PG),
+    # Individual Log-Losses
+    loss_hd  = -log(HD / lag(HD)),
+    loss_jnj = -log(JNJ / lag(JNJ)),
+    loss_pg  = -log(PG / lag(PG)),
+    # Portfolio Log-Loss (Weighted sum of individual losses)
+    port_loss = (dataset$weights[[1]] * loss_hd) + 
+                (dataset$weights[[2]] * loss_jnj) + 
+                (dataset$weights[[3]] * loss_pg)
+  ) %>%
+  drop_na() %>%
+  mutate(across(contains("loss"), abs, .names = "abs_{.col}")) #create absolute loss columns
+
+# reshape 
+prices_long_master <- prices_df_master %>%
+  select(Date, HD, JNJ, PG, PORTFOLIO, 
+         loss_hd, loss_jnj, loss_pg, port_loss,
+         abs_loss_hd, abs_loss_jnj, abs_loss_pg, abs_port_loss) %>%
+  pivot_longer(cols = -Date, names_to = "Variable", values_to = "Value") %>%
+  mutate(
+    Company = case_when(
+      grepl("hd", Variable, ignore.case = TRUE) ~ "HD",
+      grepl("jnj", Variable, ignore.case = TRUE) ~ "JNJ",
+      grepl("pg", Variable, ignore.case = TRUE) ~ "PG",
+      grepl("port", Variable, ignore.case = TRUE) ~ "PORTFOLIO",
+      TRUE ~ Variable
+    ),
+    Metric = case_when(
+      grepl("abs", Variable) ~ "Absolute Log-Loss",
+      grepl("loss", Variable) ~ "Log-Loss",
+      TRUE ~ "Price"
+    ),
+    Company = factor(Company, levels = c("HD", "JNJ", "PG", "PORTFOLIO"))
+  )
+
+```
+
+```{r plot dataset}
+# plot stock prices over time with vertical line for test period start
+ggplot(filter(prices_long_master, Metric == "Price"), aes(x = Date, y = Value, color = Company)) +
+  geom_line(linewidth = 0.8) +
+  
+  # Add a vertical line for the start of the test period
+  geom_vline(xintercept = dataset$dates.test[[1]], 
+             linetype = "dashed", 
+             color = "gray60", 
+             linewidth = 0.8) +
+             
+  theme_minimal() +
+  scale_color_manual(values = c("HD" = "#E41A1C", 
+                                "JNJ" = "#4DAF4A", 
+                                "PG" = "#377EB8", 
+                                "PORTFOLIO" = "black")) + 
+  labs(x = "Date",
+       y = "Price",
+       color = "Company") +
+  annotate("text", x = dataset$dates.test[[1]], y = Inf, 
+           label = "Test Phase", hjust = -0.1) +
+  annotate("text", x = dataset$dates.calib[[1]], y = Inf, 
+           label = "Calibration Phase", hjust = -0.1)
+
+ggsave(filename = paste0(image_path, "/stock_prices.png"), width = 8, height = 5)
+```
+
+```{r plot log data}
+prices_long_master_losses <- prices_long_master %>%
+  filter(Metric != "Price")
+
+prices_long_master_losses_plot <- ggplot(prices_long_master_losses, aes(x = Date, y = Value, color = Company)) +
+  geom_line(alpha = 0.6) +
+  geom_vline(xintercept = as.numeric(dataset$dates.test[[1]]), 
+             linetype = "dashed", color = "gray60", linewidth = 0.8) +
+  facet_grid(Metric ~ Company, scales = "free_y") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 10, face = "bold"), # Reduced from default
+        strip.background = element_rect(fill = "gray90"),
+        strip.text = element_text(face = "bold", size = 8),  # Reduced subtitle size
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 7)) +
+  # Use your existing color logic
+  scale_color_manual(values = c("HD" = "#E41A1C", 
+                                "JNJ" = "#4DAF4A", 
+                                "PG" = "#377EB8", 
+                                "PORTFOLIO" = "black")) + 
+  labs(title = "Log-Loss vs. Absolute Log-Loss, by Company",
+       x = "Date") +
+  annotate("text", x = dataset$dates.calib[[1]], y = Inf, 
+           label = "Calibration Period", hjust = -0.1, vjust = 1.5, size = 2, color = "black")+
+  annotate("text", x = dataset$dates.test[[1]], y = Inf, 
+           label = "Test", hjust = -0.1, vjust = 1.5, size = 2, color = "black")
+
+# 3. Display and Save
+print(prices_long_master_losses_plot)
+
+ggsave(filename = paste0(image_path, "/prices_long_master_losses.png"), 
+       plot = prices_long_master_losses_plot, width = 12, height = 7, dpi = 300)
+```
+
+```{r create calib data}
+calib_start_date <- dataset$dates.calib[[1]]
+calib_end_date <- dataset$dates.calib[[2]]
+
+calib_data <- prices_long_master %>%
+filter(Date >= dataset$dates.calib[[1]] & Date <= dataset$dates.calib[[2]])
+
+print(head(calib_data))
+```
+
+```{r summ stats calib}
+calib_summary_stats <- calib_data %>%
+  filter(Metric == "Log-Loss") %>%
+  group_by(Company) %>% 
+  summarize(
+    Min = min(Value),
+    Q1   = quantile(Value, 0.25), # 1st Quartile
+    Median = quantile(Value, 0.5), 
+    Mean = mean(Value),
+    Q3   = quantile(Value, 0.75), # 3rd Quartile
+    Max = max(Value),
+    SD = sd(Value),
+    N = n()
+  )
+print(calib_summary_stats)
+
+
+summary_stats_table <- calib_summary_stats %>%
+  kbl(booktabs = TRUE, 
+      format = "latex", 
+      caption = "Summary Statistics of Log-Losses: Individual Stocks vs. Portfolio",
+      digits = 6) %>%
+  kable_classic(full_width = FALSE) %>%
+  row_spec(nrow(calib_summary_stats), bold = TRUE, background = "#F2F2F2")
+
+# # Save as PNG
+# # Using format = "html" inside kbl() and saving as .png 
+# # forces kableExtra to use magick/webshot instead of LaTeX.
+# save_kable(summary_stats_table, 
+#            file = paste0(image_path, "/summary_stats_table_calib.png"), 
+#            zoom = 2)
+
+summary_stats_table
+```
+
+```{r acf}
+get_lb <- function(x, l) {
+    test <- Box.test(x, lag = l, type = "Ljung-Box")
+    stat <- format(round(test$statistic, 2), nsmall = 2)
+    pval <- format.pval(test$p.value, eps = 0.001, digits = 3)
+    return(paste0(stat, " (", pval, ")"))
+  }
+
+companies_list <- c(unique(calib_data$Company))
+print(companies_list)
+lb_results <- list()
+lags_to_test <- c(1, 2, 5, 10, 15, 30)
+
+png(file = paste0(image_path, "/ACF_correlograms_calib.png"), width = 8, height = 10, units = "in", res = 300)
+par(mfrow = c(length(companies_list), 2), mar = c(4, 4, 3, 1))
+
+#for each company
+for (comp in companies_list) {
+
+  losses <- calib_data %>%
+    filter(Company == comp, Metric == "Log-Loss") %>%
+    pull(Value)
+  abs_losses <- calib_data %>%
+    filter(Company == comp, Metric == "Absolute Log-Loss") %>%
+    pull(Value)
+
+  # create the correlogram for the company's log losses
+  acf(losses, main = paste("ACF of Log-Losses:", toupper(comp)))
+  acf(abs_losses, main = paste("ACF of Absolute Log-Losses:", toupper(comp)))
+
+  # do the ljung-box test for the log losses and absolute log losses
+
+  lb_loss_row <- sapply(lags_to_test, function(l) get_lb(losses, l))
+  lb_abs_loss_row <- sapply(lags_to_test, function(l) get_lb(abs_losses, l))
+
+  lb_results[[comp]] <- data.frame(
+    Company = comp,
+    Type = c("Raw Log-Loss", "Abs Log-Loss"),
+    L1 = c(lb_loss_row[1], lb_abs_loss_row[1]),
+    L2 = c(lb_loss_row[2], lb_abs_loss_row[2]),
+    L5 = c(lb_loss_row[3], lb_abs_loss_row[3]),
+    L10 = c(lb_loss_row[4], lb_abs_loss_row[4]),
+    L20 = c(lb_loss_row[5], lb_abs_loss_row[5])
+  )
+}
+
+dev.off()
+```
+
+
+```{r }
+par(mfrow = c(1, 1))
+
+lb_summary_table <- bind_rows(lb_results)
+rownames(lb_summary_table) <- NULL
+
+lb_summary_table %>%
+  kbl(booktabs = TRUE, 
+      format = "latex", 
+      caption = "Ljung-Box Test Results (Lag = 10)",
+      col.names = c("Company", "Data Type", "Lag 1", "Lag 2", "Lag 5", "Lag 10", "Lag 20")) %>%
+  kable_classic(full_width = FALSE) %>%
+  add_header_above(c(" " = 2, "Test Statistic (P-Value)" = 5)) 
+  # %>%
+  # save_kable(file = paste0(image_path, "/Ljung_Box_Table_Calib.png"))
+
+lb_summary_table
+```
+
+
+```{r fit argarch models}
+portfolio_losses_calib <- calib_data %>%
+  filter(Company == "PORTFOLIO", Metric == "Log-Loss") %>%
+  pull(Value)
+
+portfolio_losses_calib_date <- calib_data %>%
+  filter(Company == "PORTFOLIO", Metric == "Log-Loss") %>%
+  select(Date, Value)
+# test k in 0,1,2 (AR order), p&q in 1,2 (GARCH order)
+# set to minimal value for default
+best_aic <- Inf
+best_k_aic <- 0
+best_q_aic <- 0
+best_p_aic <- 1
+best_fit_aic <- NULL
+best_spec_aic<-NULL
+
+best_bic <- Inf
+best_k_bic <- 0
+best_q_bic <- 0
+best_p_bic <- 1
+best_fit_bic <- NULL
+best_spec_bic<-NULL
+
+results_list <- list()
+
+#k stands for AR order, represents how many past values of the series are used to predict the current value. can be 0 (past values don't help predict current value), 1 (only the immediately preceding value helps), etc
+
+#q represents number of lagged terms of the squared residuals (the "ARCH" part) that should be included in the model. q=1 means that the model will include one lag of the squared residuals, which captures the idea that today's volatility is influenced by yesterday's shocks to volatility. q=2 would include two lags, meaning today's volatility is influenced by both yesterday's and the day before yesterday's shocks, etc. q=0 would mean that the model does not include any lagged terms of the squared residuals, which is not typical for GARCH models since they are designed to capture volatility clustering; it becomes ARCH model; it means that there is no "momentum" in the volatility, and today's volatility is not influenced by past shocks.
+
+#cannot run p=0. looks at number of lags of the variance (volatility) that should be included in the model. p=1 means that the model will include one lag of the conditional variance, which captures the idea that today's volatility is influenced by yesterday's volatility. p=2 would include two lags, meaning today's volatility is influenced by both yesterday's and the day before yesterday's volatility, etc. p=0 would mean that the model does not include any lagged terms of the variance, which is not typical for GARCH models since they are designed to capture volatility clustering.
+```
+
+
+
+```{r loop through models}
+for (k in 0:3) {
+  for (p in 1:3) {
+    for (q in 0:3) {
+      print(sprintf("Fitting AR(%d)-GARCH(%d,%d) model...", k, p, q))
+      # like example
+      spec <- ugarchspec(
+        variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+        mean.model = list(armaOrder = c(k, 0), include.mean = TRUE),
+        distribution.model = "norm" 
+      ) 
+      
+      # Fit the model
+      fit <- tryCatch(
+        ugarchfit(spec = spec, data = portfolio_losses_calib, solver = "nloptr", solver.control = list(solver = 9)),  #like example, use nloptr and solver.control = list(solver = 9)
+        error = function(e) NULL
+      )
+      
+      # If the model converged, check its AIC
+      if (!is.null(fit) && (fit@fit$convergence==0)) {
+
+        ic <- tryCatch(infocriteria(fit), error = function(e) NULL)
+        if (!is.null(ic) && length(ic) > 0) { #model converged AND log-likelihood is not infinite/matrix is not singular
+          current_result <- data.frame(
+            Model = sprintf("AR(%d)-GARCH(%d,%d)", k, p, q),
+            k = k,
+            p = p,
+            q = q,
+            AIC = infocriteria(fit)[1],
+            BIC = infocriteria(fit)[2],
+            Shibata = infocriteria(fit)[3],
+            HQ = infocriteria(fit)[4]
+          )
+          # Save this row
+          list_name <- sprintf("m_%d_%d_%d", k, p, q)
+          results_list[[list_name]] <- current_result
+
+          current_aic <- infocriteria(fit)[1] 
+          current_bic <- infocriteria(fit)[2]
+
+          cat(sprintf("AR(%d)-GARCH(%d,%d) AIC: %f\n", k, p, q, current_aic))
+          # Update best model if current AIC is lower
+          if (current_aic < best_aic) {
+            best_aic <- current_aic
+            best_k_aic <- k
+            best_p_aic <- p
+            best_q_aic <- q
+            best_fit_aic <- fit
+            best_spec_aic <- spec
+          }
+          cat(sprintf("AR(%d)-GARCH(%d,%d) BIC: %f\n", k, p, q, current_bic))
+          if (current_bic < best_bic) {
+            best_bic <- current_bic
+            best_k_bic <- k
+            best_p_bic <- p
+            best_q_bic <- q
+            best_fit_bic <- fit
+            best_spec_bic <- spec
+          }
+        }
+      }
+    }
+  }
+}
+
+#get best model
+cat(sprintf("\n*** Best Model Selected by AIC: AR(%d)-GARCH(%d,%d) ***\n", best_k_aic, best_p_aic, best_q_aic))
+cat(sprintf("\n*** Best Model Selected by BIC: AR(%d)-GARCH(%d,%d) ***\n", best_k_bic, best_p_bic, best_q_bic))
+
+```
+
+```{r examine all results}
+print(results_list)
+
+results_df <- bind_rows(results_list)
+results_df
+
+best_aic_model <- results_df %>% 
+  slice_min(AIC, n = 1)
+
+best_bic_model <- results_df %>% 
+  slice_min(BIC, n = 1)
+
+cat("Best Model by AIC")
+print(best_aic_model)
+
+cat("Best Model by BIC")
+print(best_bic_model)
+```
+
+```{r }
+params_robust <- as.data.frame(best_fit_bic@fit$robust.matcoef)
+params_normal <- as.data.frame(best_fit_bic@fit$matcoef)
+
+params_table <- data.frame(
+  Estimate = params_robust[, 1],
+  SE_Norm  = params_normal[, 2],
+  CI_L_Norm = params_normal[, 1] - (1.96 * params_normal[, 2]),
+  CI_U_Norm = params_normal[, 1] + (1.96 * params_normal[, 2]),
+  P_Norm   = format.pval(params_normal[, 4], eps = 0.001, digits = 3),
+  SE_Rob   = params_robust[, 2],
+  CI_L_Rob  = params_robust[, 1] - (1.96 * params_robust[, 2]),
+  CI_U_Rob  = params_robust[, 1] + (1.96 * params_robust[, 2]),
+  P_Rob    = format.pval(params_robust[, 4], eps = 0.001, digits = 3)
+)
+
+
+rownames(params_table) <- c("$\\mu$ (Mean)", "$\\omega$ (Constant)", "$\\alpha_1$ (ARCH)", "$\\beta_1$ (GARCH)")
+colnames(params_table) <- c("Estimate", "SE", "Lower", "Upper", "p-val", "SE", "Lower", "Upper", "p-val")
+```
+
+
+```{r}
+print(best_spec_bic)
+```
+
+```{r check model fit bic}
+print(best_fit_bic)
+
+show(best_fit_bic)
+std_residuals_bic <- as.numeric(residuals(best_fit_bic, standardize = TRUE))
+```
+
+```{r }
+par(mfrow=c(2,2))
+# empircal density of standardized residuals
+plot(best_fit_bic, which = 8)
+
+# qqplot of standardized residuals
+plot(best_fit_bic, which = 9)
+
+# acf standardized residuals
+plot(best_fit_bic, which = 10)
+
+# acf squared standardized residuals
+plot(best_fit_bic, which = 11)
+```
+
+
+
+
+```{r check model fit lb test bic}
+
+lb_results_bic <- list()
+
+lb_std <- sapply(lags_to_test, function(l) get_lb(std_residuals_bic, l))
+lb_std_sq <- sapply(lags_to_test, function(l) get_lb(std_residuals_bic^2, l))
+
+lb_std_diagnostic_summary <- data.frame(
+  Lag = lags_to_test,
+  `Std. Residuals` = lb_std,
+  `Squared Std. Residuals` = lb_std_sq,
+  check.names = FALSE
+)
+print(lb_std_diagnostic_summary)
+
+```
+
+```{r check model fit diagnostic plots bic}
+png(file = paste0(image_path, "/best_model_bic_diagnostics_calib.png"), width = 12, height = 10, units = "in", res = 300)
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+#for each company
+
+# standardized residuals over time 
+plot(std_residuals_bic, type = "l", main = "Standardized Residuals", ylab = "Residuals", xlab="Index (Days)")
+
+#  QQ-Plot of sttandardized residuals (Checks for normality of residuals)
+qqnorm(std_residuals_bic, main = "Normal Q-Q Plot")
+qqline(std_residuals_bic, col = "red", lwd = 2)
+
+# ACF of standardized residuals (Checks for leftover autocorrelation in the mean)
+acf(std_residuals_bic, main = paste0("ACF of Standardized Residuals: AR(", best_k_bic, ")-GARCH(", best_p_bic, ",", best_q_bic, ")"))
+
+# ACF of Squared Standardized Residuals (checks for leftover volatility clustering)
+acf(std_residuals_bic^2, main = paste0("ACF of Squared Standardized Residuals: AR(", best_k_bic, ")-GARCH(", best_p_bic, ",", best_q_bic, ")"))
+
+par(mfrow = c(1, 1))
+dev.off()
+```
+
+
+
+```{r extreme value modelling mean residual life}
+z <- as.numeric(std_residuals_bic) #get standardized residuals
+
+par(mfrow = c(1, 1))
+
+png(paste0(image_path, "/mrl_calib.png"), width = 5, height = 5, units = "in", res = 300)
+
+# create mean residual life plot to help select threshold for GPD fitting
+mrl.plot(z)
+title(main = "Mean Residual Life Plot")
+axis(1, at = seq(floor(min(z)), ceiling(max(z)), by = 0.5), 
+     labels = FALSE, 
+     tcl = -0.3)
+
+dev.off()
+```
+
+
+```{r look at u quantiles}
+#test different thresholds for GPD fitting, guided by the mean residual life plot
+u_min <- quantile(z, 0.50)
+u_max <- quantile(z, 0.99)
+print(u_min) #0.28 (0.48 if 70%)
+print(u_max) #2.53 (1.68 if 95%)
+
+print(quantile(z, 0.88))
+print(quantile(z, 0.9))
+print(quantile(z, 0.95))
+print(quantile(z, 0.96)) #96% quantile is 1.8
+print(quantile(z, 0.97))
+```
+
+```{r plot stability}
+png(paste0(image_path, "/stability_calib.png"), width = 1200, height = 600)
+gpd.fitrange(z, umin = u_min, umax = u_max, nint = 30)
+axis(1, at = seq(floor(min(z)), ceiling(max(z)), by = 0.1), 
+     labels = FALSE, 
+     tcl = -0.3)
+dev.off()
+```
+
+
+```{r test different thresholds}
+# run automated threshold selection.
+automated_u <- gpdSeqTests(z, thresholds = seq(0.5, 2.0, by = 0.1), method = "ad")
+print(automated_u)
+
+#select lowest u with p-value above 0.05.
+final_u <- 1.6
+u_quantile <- mean(z <= final_u)
+u_quantile
+```
+
+
+```{r get mle estimates of gpd parameters}
+# get MLE estimates for the GPD parameters (scale and shape) using the selected threshold
+
+final_gpd_model <- gpd.fit(z, threshold = final_u)
+
+sigma_u <- final_gpd_model$mle[1]  
+epsilon <- final_gpd_model$mle[2]       
+print(sigma_u) 
+print(epsilon)
+
+deviance <- 2 * final_gpd_model$nllh
+threshold <- final_gpd_model$threshold
+n_total <- length(z)
+n_u <- sum(z > threshold)
+prop_u <- n_u / n_total
+estimates <- final_gpd_model$mle
+se <- sqrt(diag(final_gpd_model$cov))
+
+cat(sprintf("Deviance: %.4f\n\n", deviance))
+cat(sprintf("Threshold: %.1f\n", threshold))
+cat(sprintf("Number Above: %d\n", n_u))
+cat(sprintf("Proportion Above: %.3f\n\n", prop_u))
+
+cat("Estimates\n")
+est_table <- matrix(estimates, nrow = 1)
+colnames(est_table) <- c("scale", "shape")
+print(round(est_table, 5))
+cat("\n")
+
+cat("Standard Errors\n")
+se_table <- matrix(se, nrow = 1)
+colnames(se_table) <- c("scale", "shape")
+print(round(se_table, 5))
+cat("\n")
+
+conv_status <- ifelse(final_gpd_model$conv == 0, "successful", "failed")
+cat("Optimization Information\n")
+cat(sprintf("  Convergence: %s\n", conv_status))
+```
+
+```{r use fpot}
+final_gpd_model_fpot <- evd::fpot(z, threshold = final_u)
+print(final_gpd_model_fpot$convergence)
+sigma_u_fpot <- final_gpd_model_fpot$param[[1]]
+epsilon_fpot <- final_gpd_model_fpot$param[[2]]
+
+print(sigma_u_fpot)
+print(epsilon_fpot)
+
+print(final_gpd_model_fpot)
+```
+
+```{r get param ci}
+ci_fpot <- confint(final_gpd_model_fpot)
+print(ci_fpot)
+
+# Wald Intervals: Estimate +/- 1.96 * SE
+z_val <- qnorm(0.975) # 1.96 for 95% CI
+
+lower_scale <- estimates[1] - z_val * se[1]
+upper_scale <- estimates[1] + z_val * se[1]
+
+lower_shape <- estimates[2] - z_val * se[2]
+upper_shape <- estimates[2] + z_val * se[2]
+
+# Format for your Section 4.2 text
+cat(sprintf("Scale: %.4f (95%% CI: %.4f, %.4f)\n", estimates[1], lower_scale, upper_scale))
+cat(sprintf("Shape: %.4f (95%% CI: %.4f, %.4f)\n", estimates[2], lower_shape, upper_shape))
+```
+
+
+```{r plot gpd fitted}
+plot(final_gpd_model_fpot)
+
+```
+
+```{r build cdf}
+# calculate sample size and number of exceedances above threshold
+n <- length(z)
+n_u <- sum(z > final_u)
+print(n)
+print(n_u)
+
+# build the semi-parametric CDF function F_hat_u(x) that combines the empirical distribution below the threshold and the GPD tail above the threshold
+F_hat_u <- function(x) {
+  if (x <= final_u) {
+    # empirical dist, below threshold:  n^-1 * sum(I(xj <= x))
+    return(mean(z <= x)) 
+  } else {
+    # GPD, above threshold: 1 - (n_u / n) * (1 + epsilon * (x - u) / sigma)^(-1 / epsilon)
+    tail_prob <- (n_u / n) * (1 + epsilon * ((x - final_u) / sigma_u))^(-1 / epsilon)
+    return(1 - tail_prob)
+  }
+}
+
+# test the function
+cat(sprintf("Prob(Z <= 0.0) [Empirical]: %f\n", F_hat_u(0.0)))
+cat(sprintf("Prob(Z <= 2.5) [GPD Tail]:  %f\n", F_hat_u(2.5)))
+```
+
+
+```{r calculate quantiles} 
+
+
+#  apply the VaR formula for the GPD tail, using the sigma_u, epsilon, n, and n_u from earlier
+# make sure to do Pr(Z>v_𝛼) = Pr(Z>v_𝛼 | Z>u)*Pr(Z>u) + Pr(Z>v_𝛼 | Z<=u)*Pr(z<=u) (second term is 0)
+#u + sigma/epsilon * (((1-alpha)/F-bar(u))^(-epsilon) - 1)
+#get P(Z>u)
+#n/n_u is 1/Pr(Z>u)
+
+if (.95 <= u_quantile) {
+  z_95 <- as.numeric(quantile(z, 0.95))
+} else {
+  z_95 <- final_u + (sigma_u / epsilon) * ( ((n / n_u) * (1 - 0.95))^(-epsilon) - 1 )
+}
+
+if (.99 <= u_quantile) {
+  z_99 <- as.numeric(quantile(z, 0.99))
+} else {
+  z_99 <- final_u + (sigma_u / epsilon) * ( ((n / n_u) * (1 - 0.99))^(-epsilon) - 1 )
+}
+
+
+# z_95 <- final_u + (sigma_u / epsilon) * ( ((n / n_u) * (1 - 0.95))^(-epsilon) - 1 )
+# z_99 <- final_u + (sigma_u / epsilon) * ( ((n / n_u) * (1 - 0.99))^(-epsilon) - 1 )
+
+cat(sprintf("95%% Quantile (z_0.95): %f\n", z_95))
+cat(sprintf("99%% Quantile (z_0.99): %f\n", z_99))
+```
+
+
+```{r compute in-sample VAR}
+# extract fitted mu, sigma; these are in-sample estimates 
+mu_fitted <- as.numeric(fitted(best_fit_bic))
+sigma_fitted <- as.numeric(sigma(best_fit_bic))
+
+# calculate daily VAR, using the z_95 and z_99 quantiles from previous step, and the fitted mu and sigma from the AR-GARCH model
+insample_VaR_95 <- mu_fitted + (sigma_fitted * z_95)
+insample_VaR_99 <- mu_fitted + (sigma_fitted * z_99)
+
+calibration_results <- portfolio_losses_calib_date %>%
+  mutate(
+    VaR95 = insample_VaR_95,
+    VaR99 = insample_VaR_99
+  )
+print(head(calibration_results))
+
+print(length(calibration_results$Value))
+print(length(calibration_results$VaR95))
+print(length(calibration_results$VaR99))
+print(nrow(calibration_results))
+print(n)
+
+# How many times did the actual loss exceed the VaR?
+violations_95 <- sum(calibration_results$Value > calibration_results$VaR95)
+violations_99 <- sum(calibration_results$Value > calibration_results$VaR99)
+
+cat(sprintf("Total Days: %d\n", nrow(calibration_results)))
+cat(sprintf("95%% VaR Violations: %d (Expected: ~%d)\n", violations_95, round(nrow(calibration_results)*0.05)))
+cat(sprintf("99%% VaR Violations: %d (Expected: ~%d)\n", violations_99, round(nrow(calibration_results)*0.01)))
+```
+
+```{r plot VAR violations insample}
+calibration_results$Breach <- "None"
+calibration_results$Breach[calibration_results$Value > calibration_results$VaR95] <- "95% Breach"
+calibration_results$Breach[calibration_results$Value > calibration_results$VaR99] <- "99% Breach"
+
+ggplot(calibration_results, aes(x = Date)) +
+  # Daily log-losses in gray
+  geom_line(aes(y = Value), color = "gray80", alpha = 0.7) +
+  #VaR lines
+  geom_line(aes(y = VaR95, color = "95% VaR"), linetype = "dashed", size = 0.7, alpha=0.5) +
+  geom_line(aes(y = VaR99, color = "99% VaR"), linetype = "dashed", size = 0.7, alpha=0.5) +
+  
+  # Highlight breaches
+  geom_point(data = subset(calibration_results, Breach == "95% Breach"), 
+             aes(y = Value), color = "blue", size = 1.5) +
+  geom_point(data = subset(calibration_results, Breach == "99% Breach"), 
+             aes(y = Value), color = "red", size = 2) +
+  
+  scale_color_manual(values = c("95% VaR" = "blue", "99% VaR" = "red")) +
+  labs(title = "In-Sample VaR Backtesting: GARCH-GPD Model",
+       subtitle = paste0("Total Days: ", nrow(calibration_results), 
+                         " | 95% Violations: ", violations_95, 
+                         " | 99% Violations: ", violations_99),
+       x = "Date",
+       y = "Log Loss",
+       color = "VaR Level") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave(filename = paste0(image_path, "/insample_var_violations.png"), width = 8, height = 5)
+```
+
+```{r}
+
+mean_VaR95 <- mean(insample_VaR_95)
+mean_VaR99 <- mean(insample_VaR_99)
+
+cat(sprintf("Average 95%% In-Sample VaR: %f\n", mean_VaR95))
+cat(sprintf("Average 99%% In-Sample VaR: %f\n", mean_VaR99))
+```
+
+```{r biniomial test insample}
+insample_95_binom <- binom.test(x = violations_95, n = n, p = .05, alternative = "two.sided")
+insample_99_binom <- binom.test(x = violations_99, n = n, p = .01, alternative = "two.sided")
+print(insample_95_binom$p.value)
+print(insample_99_binom$p.value)
+```
+
+
+
+```{r}
+portfolio_losses_full <- prices_long_master %>%
+  filter(Company == "PORTFOLIO", Metric == "Log-Loss") %>%
+  pull(Value)
+
+portfolio_losses_full_date <- prices_long_master %>%
+  filter(Company == "PORTFOLIO", Metric == "Log-Loss") %>%
+  select(Date, Value)
+
+#get test dates, and indices for the test period
+test_start_date <- dataset$dates.test[[1]]
+test_end_date <- dataset$dates.test[[2]]
+
+test_start_idx <- which(portfolio_losses_full_date$Date == test_start_date)
+test_end_idx   <- which(portfolio_losses_full_date$Date == max(portfolio_losses_full_date$Date))#mismatch of maximum date of dataset, and max end date. ensure use the right one.
+
+
+print(test_start_idx)
+print(test_end_idx)
+print(test_end_date)
+print(max(portfolio_losses_full_date$Date)) 
+
+test_indices <- test_start_idx:test_end_idx
+n_test <- length(test_indices)
+print(n_test)
+
+# store rolling VaR predictions
+rolling_VaR95 <- rep(NA, n_test)
+rolling_VaR99 <- rep(NA, n_test)
+
+n_window <- n # Use the entire calibration period as the rolling window size
+
+convergence_failures <- 0
+```
+
+
+
+```{r rolling test}
+
+# Rolling window : for each day in the test period:
+for (i in 1:n_test) {
+
+  target_idx <- test_indices[i]
+
+  # get the portfolio loss series up to the current day (excluding the current day)
+  # use most recent n_window (calibration dataset size) days of data for fitting the model
+  window_data <- portfolio_losses_full[(target_idx - n_window):(target_idx - 1)]  
+
+ #Fit AR(0)-GARCH(1,1) to the current window 
+  temp_fit <- tryCatch(
+    ugarchfit(spec = best_spec_bic, data = window_data, solver = "nloptr", solver.control = list(solver = 9)),
+    error = function(e) NULL
+  )
+
+  if(!is.null(temp_fit) && convergence(temp_fit) == 0) {
+    # Extract standardised innovations z_{t-n+1}, ..., z_t
+    z_temp <- as.numeric(residuals(temp_fit, standardize = TRUE))
+    
+    # Predict conditional mean (mu_t+1) and volatility (sigma_t+1), using the fitted AR-GARCH model on the current window
+    temp_fcst <- ugarchforecast(temp_fit, n.ahead = 1)
+    mu_next    <- as.numeric(fitted(temp_fcst))
+    sigma_next <- as.numeric(sigma(temp_fcst))
+    
+    #Predict 0.95 and 0.99 quantiles of innovations using GPD (from A.4)
+    #First, fit GPD to the innovations in the current window, using the same threshold selection method as before; use same final_u threshold for consistency 
+    # NIKITA QUESTION: SHOULD IT BE A ROLLING U THRESHOLD?
+    temp_gpd <- tryCatch(
+      gpd.fit(z_temp, threshold = final_u, show = FALSE),
+      error = function(e) NULL
+    )
+
+    if (final_u >= quantile(z_temp, 0.95)) {
+      z95_roll <- as.numeric(quantile(z_temp, 0.95))
+    } else {
+      z95_roll <- NULL 
+    }
+
+    if (final_u >= quantile(z_temp, 0.99)) {
+      z99_roll <- as.numeric(quantile(z_temp, 0.99))
+    } else {
+      z99_roll <- NULL 
+    }
+
+    if(!is.null(temp_gpd)) {
+      # Extract GPD MLE parameters for this specific window
+      sig_u_roll <- temp_gpd$mle[1] #scale parameter
+      epsilon_roll    <- temp_gpd$mle[2] #shape parameter
+      n_total    <- length(z_temp) #total number of observations in the current window
+      n_u_roll   <- temp_gpd$nexc #number of exceedances above the threshold in the current window
+
+      # Find z_alpha
+      if(is.null(z95_roll)) {
+        z95_roll <- final_u + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.95))^(-epsilon_roll) - 1)
+      }
+      if(is.null(z99_roll)) {
+        z99_roll <- final_u + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.99))^(-epsilon_roll) - 1)
+      }
+       
+      #Compute VaR predictions for day t + 1, by plugging the forecasted mu and sigma from the AR-GARCH model, and the z_alpha from the GPD tail model, into the VaR formula: VaR_alpha = mu_t+1 + sigma_t+1 * z_alpha
+      rolling_VaR95[i] <- mu_next + (sigma_next * z95_roll)
+      rolling_VaR99[i] <- mu_next + (sigma_next * z99_roll)
+    }
+  } else {
+    convergence_failures <- convergence_failures + 1
+    cat(sprintf("Model fitting failed to converge for test day %d (Date: %s). Skipping VaR prediction for this day.\n", 
+                i, as.character(portfolio_losses_full_date$Date[target_idx])))
+  }
+  # Progress monitoring 
+  if(i %% 100 == 0) cat(sprintf("Processed %d / %d testing days...\n", i, n_test))
+}
+
+# NIKITA QUESTION: WHAT DO WE DO ABOUT DAYS THAT DONT CONVERGE?
+```
+
+
+```{r}
+# Consolidate results into a final dataframe
+rolling_backtest_df <- data.frame(
+  Date        = portfolio_losses_full_date$Date[test_indices],
+  Actual_Loss = portfolio_losses_full_date$Value[test_indices],
+  VaR95       = rolling_VaR95,
+  VaR99       = rolling_VaR99
+)
+print(head(rolling_backtest_df))
+```
+
+
+```{r backtesting}
+# Calculate violation counts; use na.rm = TRUE in case any days in the loop failed to converge
+v95_test <- sum(rolling_backtest_df$Actual_Loss > rolling_backtest_df$VaR95, na.rm = TRUE)
+v99_test <- sum(rolling_backtest_df$Actual_Loss > rolling_backtest_df$VaR99, na.rm = TRUE)
+
+# Calculate the  violation rates, exclude any days where VaR prediction was NA (due to model fitting failure)
+n_test_valid <- sum(!is.na(rolling_backtest_df$VaR95))
+rate_95 <- v95_test / n_test_valid
+rate_99 <- v99_test / n_test_valid
+
+cat(sprintf("Total Test Days: %d\n", n_test_valid))
+cat(sprintf("95%% VaR Violations: %d (Rate: %.2f%%, Expected: 5.00%%)\n", v95_test, rate_95 * 100))
+cat(sprintf("99%% VaR Violations: %d (Rate: %.2f%%, Expected: 1.00%%)\n", v99_test, rate_99 * 100))
+```
+
+
+```{r biniomial test test}
+test_95_binom <- binom.test(x = v95_test, n = n_test_valid, p = .05, alternative = "two.sided")
+test_99_binom <- binom.test(x = v99_test, n = n_test_valid, p = .01, alternative = "two.sided")
+print(test_95_binom$p.value)
+print(test_99_binom$p.value)
+```
+
+
+```{r backtesting plots}
+png(file = paste0(image_path, "/backtest_plot.png"), width = 10, height = 6, units = "in", res = 300)
+
+ggplot(rolling_backtest_df, aes(x = Date)) +
+  geom_line(aes(y = Actual_Loss), color = "gray80", alpha = 0.6) +
+  geom_line(aes(y = VaR95), color = "blue", linetype = "dashed", alpha = 0.7) +
+  geom_line(aes(y = VaR99), color = "red", alpha = 0.7) + 
+  geom_point(data = filter(rolling_backtest_df, Actual_Loss > VaR95 & Actual_Loss <= VaR99), 
+             aes(y = Actual_Loss), color = "blue", size = 1.5, alpha = 0.8) +
+    geom_point(data = filter(rolling_backtest_df, Actual_Loss > VaR99), 
+             aes(y = Actual_Loss), color = "red", size = 2) +
+  theme_minimal() +
+  labs(title = "Out-of-Sample VaR Backtest (Rolling Window)",
+       subtitle = "Blue = 95% VaR, Red = 99% VaR, Dots = Violations",
+       y = "Log-Loss", x = "Date")
+
+dev.off()
+```
+
+```{r}
+#now display
+ggplot(rolling_backtest_df, aes(x = Date)) +
+  geom_line(aes(y = Actual_Loss), color = "gray80", alpha = 0.6) +
+  geom_line(aes(y = VaR95), color = "blue", linetype = "dashed", alpha = 0.7) +
+  geom_line(aes(y = VaR99), color = "red", linetype = "dashed", alpha = 0.7) +  
+  geom_point(data = filter(rolling_backtest_df, Actual_Loss > VaR95 & Actual_Loss <= VaR99), 
+             aes(y = Actual_Loss), color = "blue", size = 1.5, alpha = 0.8) +
+    geom_point(data = filter(rolling_backtest_df, Actual_Loss > VaR99), 
+             aes(y = Actual_Loss), color = "red", size = 2) +
+  theme_minimal() +
+  labs(title = "Out-of-Sample VaR Backtest (Rolling Window)",
+       subtitle = "Blue = 95% VaR, Red = 99% VaR, Dots = Violations",
+       y = "Log-Loss", x = "Date")
+
+```
+
+
+
+```{r}
+# store rolling VaR predictions
+rolling_VaR95_rollingu <- rep(NA, n_test)
+rolling_VaR99_rollingu <- rep(NA, n_test)
+
+n_window <- n # Use the entire calibration period as the rolling window size
+
+convergence_failures_rollingu <- 0
+```
+
+
+```{r rolling test rolling u}
+
+# Rolling window : for each day in the test period:
+for (i in 1:n_test) {
+
+  target_idx <- test_indices[i]
+
+  # get the portfolio loss series up to the current day (excluding the current day)
+  # use most recent n_window (calibration dataset size) days of data for fitting the model
+  window_data <- portfolio_losses_full[(target_idx - n_window):(target_idx - 1)]  
+
+ #Fit AR(0)-GARCH(1,1) to the current window 
+  temp_fit <- tryCatch(
+    ugarchfit(spec = best_spec_bic, data = window_data, solver = "nloptr", solver.control = list(solver = 9)),
+    error = function(e) NULL
+  )
+
+  if(!is.null(temp_fit) && convergence(temp_fit) == 0) {
+    # Extract standardised innovations z_{t-n+1}, ..., z_t
+    z_temp <- as.numeric(residuals(temp_fit, standardize = TRUE))
+    
+    # Predict conditional mean (mu_t+1) and volatility (sigma_t+1), using the fitted AR-GARCH model on the current window
+    temp_fcst <- ugarchforecast(temp_fit, n.ahead = 1)
+    mu_next    <- as.numeric(fitted(temp_fcst))
+    sigma_next <- as.numeric(sigma(temp_fcst))
+    
+    #Predict 0.95 and 0.99 quantiles of innovations using GPD 
+
+    #CALCULATE NEW U, based on 5% again.
+    # temp_automated_u <- gpdSeqTests(z_temp, thresholds = seq(0.5, 2.0, by = 0.1), method = "ad")
+    #select lowest u with p-value above 0.05.
+
+    # temp_final_u <- min(temp_automated_u[temp_automated_u$p.value > 0.05, "threshold"])
+
+    temp_final_u <- quantile(z_temp, u_quantile)
+
+    temp_gpd <- tryCatch(
+      gpd.fit(z_temp, threshold = temp_final_u, show = FALSE),
+      error = function(e) NULL
+    )
+
+    if (temp_final_u >= quantile(z_temp, 0.95)) {
+      z95_roll <- as.numeric(quantile(z_temp, 0.95))
+    } else {
+      z95_roll <- NULL 
+    }
+
+    if (temp_final_u >= quantile(z_temp, 0.99)) {
+      z99_roll <- as.numeric(quantile(z_temp, 0.99))
+    } else {
+      z99_roll <- NULL 
+    }
+    
+    if(!is.null(temp_gpd)) {
+      # Extract GPD MLE parameters for this specific window
+      sig_u_roll <- temp_gpd$mle[1] #scale parameter
+      epsilon_roll    <- temp_gpd$mle[2] #shape parameter
+      n_total    <- length(z_temp) #total number of observations in the current window
+      n_u_roll   <- temp_gpd$nexc #number of exceedances above the threshold in the current window
+
+      # Find z_alpha
+      if(is.null(z95_roll)) {
+        z95_roll <- temp_final_u + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.95))^(-epsilon_roll) - 1)
+      }
+      if(is.null(z99_roll)) {
+        z99_roll <- temp_final_u + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.99))^(-epsilon_roll) - 1)
+      }
+
+      #Compute VaR predictions for day t + 1, by plugging the forecasted mu and sigma from the AR-GARCH model, and the z_alpha from the GPD tail model, into the VaR formula: VaR_alpha = mu_t+1 + sigma_t+1 * z_alpha
+      rolling_VaR95_rollingu[i] <- mu_next + (sigma_next * z95_roll)
+      rolling_VaR99_rollingu[i] <- mu_next + (sigma_next * z99_roll)
+    }
+  } else {
+    convergence_failures_rollingu <- convergence_failures_rollingu + 1
+    cat(sprintf("Model fitting failed to converge for test day %d (Date: %s). Skipping VaR prediction for this day.\n", 
+                i, as.character(portfolio_losses_full_date$Date[target_idx])))
+  }
+  # Progress monitoring 
+  if(i %% 100 == 0) cat(sprintf("Processed %d / %d testing days...\n", i, n_test))
+}
+
+# NIKITA QUESTION: WHAT DO WE DO ABOUT DAYS THAT DONT CONVERGE?
+```
+
+
+```{r}
+# Consolidate results into a final dataframe
+rolling_backtest_df_rollingu <- data.frame(
+  Date        = portfolio_losses_full_date$Date[test_indices],
+  Actual_Loss = portfolio_losses_full_date$Value[test_indices],
+  VaR95       = rolling_VaR95_rollingu,
+  VaR99       = rolling_VaR99_rollingu
+)
+print(head(rolling_backtest_df_rollingu))
+```
+
+
+```{r backtesting rolling u}
+# Calculate violation counts; use na.rm = TRUE in case any days in the loop failed to converge
+v95_test_rollingu <- sum(rolling_backtest_df_rollingu$Actual_Loss > rolling_backtest_df_rollingu$VaR95, na.rm = TRUE)
+v99_test_rollingu <- sum(rolling_backtest_df_rollingu$Actual_Loss > rolling_backtest_df_rollingu$VaR99, na.rm = TRUE)
+
+# Calculate the  violation rates, exclude any days where VaR prediction was NA (due to model fitting failure)
+n_test_valid_rollingu <- sum(!is.na(rolling_backtest_df_rollingu$VaR95))
+rate_95_rollingu <- v95_test_rollingu / n_test_valid_rollingu
+rate_99_rollingu <- v99_test_rollingu / n_test_valid_rollingu
+
+cat(sprintf("Total Test Days: %d\n", n_test_valid_rollingu))
+cat(sprintf("95%% VaR Violations: %d (Rate: %.2f%%, Expected: 5.00%%)\n", v95_test_rollingu, rate_95_rollingu * 100))
+cat(sprintf("99%% VaR Violations: %d (Rate: %.2f%%, Expected: 1.00%%)\n", v99_test_rollingu, rate_99_rollingu * 100))
+```
+
+
+
+```{r}
+
+# Use na.rm = TRUE to account for any model convergence failures
+mean_outsample_95 <- mean(rolling_backtest_df_rollingu$VaR95, na.rm = TRUE)
+mean_outsample_99 <- mean(rolling_backtest_df_rollingu$VaR99, na.rm = TRUE)
+
+# Print results for review
+cat(sprintf("In-Sample Mean VaR (95%%): %.4f\n", mean(insample_VaR_95)))
+cat(sprintf("In-Sample Mean VaR (99%%): %.4f\n", mean(insample_VaR_99)))
+cat(sprintf("Out-of-Sample Mean VaR (95%%): %.4f\n", mean_outsample_95))
+cat(sprintf("Out-of-Sample Mean VaR (99%%): %.4f\n", mean_outsample_99))
+```
+
+```{r biniomial test test rolling u}
+test_95_binom_rollingu <- binom.test(x = v95_test_rollingu, n = n_test_valid_rollingu, p = .05, alternative = "two.sided")
+test_99_binom_rollingu <- binom.test(x = v99_test_rollingu, n = n_test_valid_rollingu, p = .01, alternative = "two.sided")
+print(test_95_binom_rollingu$p.value)
+print(test_99_binom_rollingu$p.value)
+```
+
+
+```{r backtesting plots rolling u}
+png(file = paste0(image_path, "/backtest_plot_rollingu.png"), width = 10, height = 6, units = "in", res = 300)
+
+ggplot(rolling_backtest_df_rollingu, aes(x = Date)) +
+  geom_line(aes(y = Actual_Loss), color = "gray80", alpha = 0.6) +
+  geom_line(aes(y = VaR95), color = "blue", linetype = "dashed", alpha = 0.7) +
+  geom_line(aes(y = VaR99), color = "red", alpha = 0.7) + 
+  geom_point(data = filter(rolling_backtest_df_rollingu, Actual_Loss > VaR95 & Actual_Loss <= VaR99), 
+             aes(y = Actual_Loss), color = "blue", size = 1.5, alpha = 0.8) +
+    geom_point(data = filter(rolling_backtest_df_rollingu, Actual_Loss > VaR99), 
+             aes(y = Actual_Loss), color = "red", size = 2) +
+  theme_minimal() +
+  labs(title = "Out-of-Sample VaR Backtest (Rolling Window)",
+       subtitle = "Blue = 95% VaR, Red = 99% VaR, Dots = Violations",
+       y = "Log-Loss", x = "Date")
+
+dev.off()
+```
+
+
+
+
+```{r rolling u sensitivity analysis}
+u_values_to_test <- seq(1.1, 1.8, by = 0.1)
+backtest_summaries <- list()
+all_rolling_dfs <- list()
+
+
+for (u_fixed in u_values_to_test) {
+  
+  rolling_VaR95_rollingu <- rep(NA, n_test)
+  rolling_VaR99_rollingu <- rep(NA, n_test)
+  
+  convergence_failures <- 0
+# Rolling window : for each day in the test period:
+  for (i in 1:n_test) {
+
+    target_idx <- test_indices[i]
+    window_data <- portfolio_losses_full[(target_idx - n_window):(target_idx - 1)]  
+
+  #Fit AR(0)-GARCH(1,1) to the current window 
+    temp_fit <- tryCatch(
+      ugarchfit(spec = best_spec_bic, data = window_data, solver = "nloptr", solver.control = list(solver = 9)),
+      error = function(e) NULL
+    )
+      
+    if(!is.null(temp_fit) && convergence(temp_fit) == 0) {
+      # Extract standardised innovations z_{t-n+1}, ..., z_t
+      z_temp <- as.numeric(residuals(temp_fit, standardize = TRUE))
+      temp_fcst <- ugarchforecast(temp_fit, n.ahead = 1)
+      mu_next    <- as.numeric(fitted(temp_fcst))
+      sigma_next <- as.numeric(sigma(temp_fcst))
+
+      if (u_fixed >= quantile(z_temp, 0.95)) {
+        z95_roll <- as.numeric(quantile(z_temp, 0.95))
+      } else {
+        z95_roll <- NULL 
+      }
+
+      if (u_fixed >= quantile(z_temp, 0.99)) {
+        z99_roll <- as.numeric(quantile(z_temp, 0.99))
+      } else {
+        z99_roll <- NULL 
+      }
+
+      temp_gpd <- tryCatch(
+        gpd.fit(z_temp, threshold = u_fixed, show = FALSE),
+        error = function(e) NULL
+      )
+      
+      if(!is.null(temp_gpd)) {
+        # Extract GPD MLE parameters for this specific window
+        sig_u_roll <- temp_gpd$mle[1] #scale parameter
+        epsilon_roll    <- temp_gpd$mle[2] #shape parameter
+        n_total    <- length(z_temp) #total number of observations in the current window
+        n_u_roll   <- temp_gpd$nexc #number of exceedances above the threshold in the current window
+
+        # Find z_alpha
+        if(is.null(z95_roll)) {
+          z95_roll <- u_fixed + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.95))^(-epsilon_roll) - 1)
+        }
+        if(is.null(z99_roll)) {
+          z99_roll <- u_fixed + (sig_u_roll/epsilon_roll) * (((n_total/n_u_roll)*(1-0.99))^(-epsilon_roll) - 1)
+        }
+        
+        
+        #Compute VaR predictions for day t + 1, by plugging the forecasted mu and sigma from the AR-GARCH model, and the z_alpha from the GPD tail model, into the VaR formula: VaR_alpha = mu_t+1 + sigma_t+1 * z_alpha
+        rolling_VaR95_rollingu[i] <- mu_next + (sigma_next * z95_roll)
+        rolling_VaR99_rollingu[i] <- mu_next + (sigma_next * z99_roll)
+      }
+    } else {
+      convergence_failures <- convergence_failures + 1
+      cat(sprintf("Model fitting failed to converge for test day %d (Date: %s). Skipping VaR prediction for this day.\n", 
+                  i, as.character(portfolio_losses_full_date$Date[target_idx])))
+    }
+    # Progress monitoring 
+    if(i %% 100 == 0) cat(sprintf("Processed %d / %d testing days...\n", i, n_test))
+  }
+
+  temp_df_u <- data.frame(
+    Date        = portfolio_losses_full_date$Date[test_indices],
+    Actual_Loss = portfolio_losses_full_date$Value[test_indices],
+    VaR95       = rolling_VaR95_rollingu,
+    VaR99       = rolling_VaR99_rollingu,
+    Threshold_u = u_fixed
+  )
+
+  all_rolling_dfs[[as.character(u_fixed)]] <- temp_df_u
+  
+  # Calculate Violations and Binomial Tests
+  v95_temp <- sum(temp_df_u$Actual_Loss > temp_df_u$VaR95, na.rm = TRUE)
+  v99_temp <- sum(temp_df_u$Actual_Loss > temp_df_u$VaR99, na.rm = TRUE)
+  n_valid_temp <- sum(!is.na(temp_df_u$VaR95))
+  
+  rate95_temp <- v95_temp / n_valid_temp
+  rate99_temp <- v99_temp / n_valid_temp
+  
+  binom95_p_temp <- binom.test(x = v95_temp, n = n_valid_temp, p = 0.05, alternative = "two.sided")$p.value
+  binom99_p_temp <- binom.test(x = v99_temp, n = n_valid_temp, p = 0.01, alternative = "two.sided")$p.value
+  
+  # Store summary metrics
+  backtest_summaries[[as.character(u_fixed)]] <- data.frame(
+    u_Value = u_fixed,
+    Vio_95 = v95_temp, Rate_95 = round(rate95_temp * 100, 2), P_Val_95 = round(binom95_p_temp, 4),
+    Vio_99 = v99_temp, Rate_99 = round(rate99_temp * 100, 2), P_Val_99 = round(binom99_p_temp, 4),
+    Failures = convergence_failures
+  )
+}
+```
+
+
+```{r}
+final_summary_table <- do.call(rbind, backtest_summaries)
+rownames(final_summary_table) <- NULL
+
+print(final_summary_table)
+```
+
+
+
+
+
+
+
+# Abstract {-}
+
+This report investigates the estimation and evaluation of Value at Risk (VaR) for a financial portfolio using a semi-parametric time series framework. The portfolio consists of three stocks and is modeled through daily log-losses derived from price data. To account for key stylized facts of financial returns, including volatility clustering and heavy tails, a two-stage methodology is implemented. First, an AR-GARCH model is fitted to filter the time series and extract approximately independent and identically distributed innovations. Second, Extreme Value Theory (EVT) is applied to the tail of these innovations using a Generalized Pareto Distribution (GPD) to estimate extreme quantiles.
+
+VaR forecasts at the 95% and 99% confidence levels are generated both in-sample and out-of-sample, the latter using a rolling window approach. Model performance is assessed through backtesting based on the binomial test of violation rates. The results indicate that the AR-GARCH-GPD framework provides accurate and well-calibrated risk estimates at the 95% level, but tends to underestimate risk at the 99% level in the testing set, suggesting limitations in capturing extreme tail events. Overall, the model performs well for moderate tail risk but highlights the increased difficulty of accurately modelling the far tail of the loss distribution. 
+
+# Introduction
+
+Quantifying financial risk is a central task in modern portfolio management, particularly in the presence of volatile and heavy-tailed asset returns. One of the most widely used risk measures is Value at Risk (VaR), which summarizes the potential loss of a portfolio over a given time horizon at a specified confidence level. From a statistical perspective, VaR corresponds to an extreme quantile of the loss distribution, making its accurate estimation highly dependent on properly modeling both the dynamics and the tail behavior of financial time series .
+
+Financial return series are known to exhibit several stylized features, including weak serial correlation, volatility clustering, and heavy-tailed distributions. These characteristics violate the assumptions of classical models and complicate the direct application of standard statistical methods. In particular, Extreme Value Theory (EVT), which is well-suited for modeling rare events, requires observations to be approximately independent and identically distributed. This motivates the use of a two-stage modeling framework that first removes temporal dependence before focusing on tail estimation.
+
+In this project, we analyze a portfolio composed of three stocks with fixed daily rebalancing weights, using log-losses as the primary variable of interest. The objective is to estimate VaR at high confidence levels (95% and 99%) using a univariate approach and to evaluate the accuracy of these estimates through backtesting. To capture both time-varying volatility and extreme tail risk, we adopt a semi-parametric framework that combines an AR-GARCH model for conditional time series modeling with EVT based on the Generalized Pareto Distribution for tail estimation. 
+
+This report first describes the dataset and presents the exploratory data analysis in Section 2,  including the summary statistics, dependence structures, and key stylized facts of the portfolio log-losses to motivate the modeling approach. It then outlines the statistical methodology in Section 3, detailing the AR-GARCH framework used to filter the time series and the EVT-based Generalized Pareto Distribution (GPD) approach used to model tail behavior and estimate extreme quantiles. Section 4 presents the empirical results, including model selection, parameter estimation, and in-sample VaR performance. It further evaluates out-of-sample VaR forecasts using a rolling window approach and assesses model accuracy through backtesting based on violation rates and binomial tests. Finally, Section 5 discusses the findings, evaluates the strengths and limitations of the framework, and suggests potential directions for improving the modeling of extreme tail risk. 
+
+# Data Description and Exploratory Data Analysis
+
+The dataset consists of daily stock prices for Home Depot (HD), Johnson's and Johnson's (JNJ), and Proctor and Gamble (PG) over the period 2000-01-03 to 2024-12-30.
+
+## Data Preprocessing and Summary Statistics
+
+These series were combined into a single portfolio of weights $0.5, 0.3, 0.2$ respectively, rebalanced daily. The dataset was split into two: a calibration set of  ($n$) days (2000-01-03 to 2018-07-29) for model specification and an out-of-sample test set of 1613 days (2018-08-02 to 2024-12-30) for backtesting, where forecasts are generated in a rolling manner (see Statistical Description of the Methods section) . Note any gaps in the data were due to non-trading days. Daily log-losses ($l_t$) were calculated as negative log-returns, where $P_t$ is the portfolio price on day t, and $P_{t-1}$ is the price on the previous day. Thus, the formula for daily log-losses is: $l_t = \log(P_{t-1}) - \log(P_t)$. 
+
+
+```{r daily-log-losses-figure, fig.cap = "Daily log losses and absolute log losses by individual stocks and for the overall portfolio. Home Depot displays the highest volatility, although the portfolio log-losses also exhibit spikes. Spikes in absolute log-losses are frequently grouped, indicating potential volatility clustering. The log-losses stay centered around zero, because the portfolio doesn't have a constant upward or downward drift on a day-to-day basis. These suggest that the portfolio risk stems from sudden spikes (volatility) rather than a gradual change in the average return.", fig.height=4, fig.width=7, include=TRUE, echo=FALSE}
+prices_long_master_losses_plot
+
+```
+
+Table \@ref(tab:summary-statistics-table) shows that the maximum log-losses of the portfolio is more than 13 standard deviations above the mean, suggesting heavy tails and the presence of extreme values in the data. Figure \@ref(fig:daily-log-losses-figure) shows that when the portfolio raw and absolute log-losses experience spikes, it is not a one-off event but rather a cluster of high-magnitude log-losses over multiple consecutive days, suggesting the presence of volatility clustering in the portfolio returns.
+
+```{r summary-statistics-table, echo=FALSE, include=TRUE}
+options(scipen = 999)
+calib_summary_stats <- calib_data %>%
+  filter(Metric == "Log-Loss") %>%
+  group_by(Company) %>% 
+  summarize(
+    Min = min(Value)*100,
+    Q1   = quantile(Value, 0.25)*100, # 1st Quartile
+    Median = quantile(Value, 0.5)*100, 
+    Mean = mean(Value)*100,
+    Q3   = quantile(Value, 0.75)*100, # 3rd Quartile
+    Max = max(Value)*100,
+    SD = sd(Value)*100,
+    N = n()
+  )
+
+calib_summary_stats %>%
+  kbl(booktabs = TRUE, 
+      format = "latex", 
+      caption = "Summary statistics of daily log-losses for individual stocks and the portfolio, calculated on the calibration dataset, shown as percentages for readability. Among the individual stocks, Home Depot (HD) exhibits the highest volatility (based on standard deviation (SD) and Inter-Quartile Range (Q3 - Q1)) among the individual stocks, increasing the overall portfolio's volatility. The overall portfolio's maximum log-loss is lower than individual stocks, which may indicate that diversification has mitigated some extreme losses. However, the maximum log-losses of the portfolio are still more than 13 standard deviations above the mean, suggesting the presence of extreme values in the data.",
+      digits = 4) %>%
+  kable_classic(full_width = FALSE) %>%
+  row_spec(nrow(calib_summary_stats), bold = TRUE, background = "#F2F2F2")%>%
+kable_styling(latex_options = c("scale_down")) %>%
+kable_styling(
+    font_size = 10
+  )
+
+# # Save as PNG
+# # Using format = "html" inside kbl() and saving as .png 
+# # forces kableExtra to use magick/webshot instead of LaTeX.
+# save_kable(summary_stats_table, 
+#            file = paste0(image_path, "/summary_stats_table_calib.png"), 
+#            zoom = 2)
+
+
+```
+
+## Detecting Autocorrelation and Volatility Clustering
+
+To assess serial dependence and conditional heteroskedasticity in the portfolio log-losses, empirical correlograms and Portmanteau tests were employed. 
+
+```{r acf-correlogram-figure, fig.cap="Auto-correlation Function (ACF) plots for portfolio-level log-losses (left) and absolute log-losses (right), on calibration dataset. The ACF plot measures the correlation between a time series and a lagged version of itself, with the x-axis showing the number of days for a lag. The vertical lines represent the correlation coefficient of each lag, and the blue dashed line represents the 95% confidence intervals (CIs). The ACF for log-losses (left) shows the majority of vertical lines lie within the 95% CIs, confirming little to no statistically significant linear autocorrelation in the raw log-losses. The ACF for absolute log-losses lie completely outside the 95% CIs, suggesting volatility clustering exists.", fig.width=7, fig.height=3, echo=FALSE, include=TRUE}
+
+losses <- calib_data %>%
+  filter(Company == "PORTFOLIO", Metric == "Log-Loss") %>%
+  pull(Value)
+
+abs_losses <- calib_data %>%
+  filter(Company == "PORTFOLIO", Metric == "Absolute Log-Loss") %>%
+  pull(Value)
+
+# 2. Set up side-by-side plotting (1 row, 2 columns)
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 2), 
+    mgp = c(2, 0.7, 0),
+    cex.main = 0.75, 
+    cex.lab = 0.75, 
+    cex.axis = .75)
+
+# Graph 1: Serial Correlation check
+acf(losses, 
+    main = "ACF: Log-Losses", 
+    col = "darkblue", 
+    lwd = 1.5,
+    ylim = c(-0.1, 1))
+
+# Graph 2: Volatility Clustering check
+acf(abs_losses, 
+    main = "ACF: Absolute Log-Losses", 
+    col = "darkblue", 
+    lwd = 1.5,
+    ylim = c(-0.1, 1))
+
+# 3. Reset plotting device
+par(mfrow = c(1, 1))
+```
+
+The visual assessment of temporal dependence relies on the sample Autocorrelation Function (ACF). For a given time series $X_t$ with sample size $n$ and sample mean $\bar{X}$, the sample autocorrelation at lag $h$ is calculated as:
+$$ \hat{\rho}(h) = \frac{\sum_{t=1}^{n-h} (X_t - \bar{X})(X_{t+h} - \bar{X})}{\sum_{t=1}^n (X_t - \bar{X})^2} $$
+
+The resulting correlograms plot $\hat{\rho}(h)$ against the lag $h$, evaluated against the standard 95% asymptotic confidence bounds for strict white noise, given by $\pm 1.96/\sqrt{n}$. To detect volatility clustering, this calculation is applied not only to the raw portfolio losses ($X_t$) to check for linear dependence, but also to the absolute losses ($|X_t|$) as a proxy for variance. Figure \@ref(fig:acf-correlogram-figure) displays the ACF plots for both the raw log-losses and absolute log-losses; the former shows little to no statistically significant autocorrelation, indicating the absence of linear dependence (an increase yesterday does not imply an increase today), while the latter shows statistically significant autocorrelation across multiple lags, indicating the presence of volatility clustering (the historical magnitude of movement implies future magnitude of movement) in the portfolio returns. 
+
+To more rigorously quantify the statistical significance of these autocorrelations, the Ljung-Box Portmanteau test is utilized. This test evaluates the null hypothesis that the data are independently distributed up to a specified maximum lag $m$ ($H_0: \rho_1 = \rho_2 = \dots = \rho_m = 0$). The Ljung-Box test statistic is defined as: 
+$$ Q(m) = n(n+2) \sum_{k=1}^m \frac{\hat{\rho}^2(k)}{n-k}, $$
+where n is the sample size (number of observations in the calibration period). $\hat{\rho}(k)$ is the sample autocorrelation at lag k. m is the number of lags being tested. 
+
+The results are shown in table \@ref(tab:ljung-box-table-initial). As expected from figure \@ref(fig:acf-correlogram-figure), the Ljung-Box test rejects the null hypothesis of no autocorrelation at all tested lags for the absolute log-losses, indicating the presence of volatility clustering in the portfolio returns. However, unlike figure \@ref(fig:acf-correlogram-figure) suggests, the Ljung-Box test rejects the null hypothesis of no autocorrelation for the raw log-losses at almost all tested lags (except lag 1). The low test statistics of raw log-losses (compared to absolute log-losses) suggest that this discrepancy may be due to the large sample size of the calibration dataset, which can lead to statistical significance even for very small autocorrelations that are not visually apparent in the correlogram. Although we suspect the autocorrelation in raw log-losses is not truly statistically significant, we will still consider AR-GARCH models for the subsequent analysis, as they can capture both linear dependence and volatility clustering and are commonly used in financial time series modeling.
+
+```{r ljung-box-table-initial, include=TRUE, echo=FALSE}
+lags_to_test<-c(1, 2, 5, 10, 20)
+# do the ljung-box test for the log losses and absolute log losses
+lb_results_display <- list()
+lb_loss_row_display <- sapply(lags_to_test, function(l) get_lb(losses, l))
+lb_abs_loss_row_display <- sapply(lags_to_test, function(l) get_lb(abs_losses, l))
+
+lb_flipped <- data.frame(
+  Lag = c("Lag 1", "Lag 2", "Lag 5", "Lag 10", "Lag 20"),
+  `Raw Log-Loss` = lb_loss_row_display[1:5],
+  `Abs Log-Loss` = lb_abs_loss_row_display[1:5],
+  check.names = FALSE
+)
+
+par(mfrow = c(1, 1))
+
+lb_flipped %>%
+  kbl(booktabs = TRUE, 
+      format = "latex", 
+      caption = "Ljung-Box Test Results for Portfolio Log-Losses and Absolute Log-Losses across Multiple Lags on the Calibration Dataset. The table displays the test statistic and p-value for each lag tested. For raw log-losses, the null hypothesis of no autocorrelation is rejected at all lags except lag 1, likely due to the large sample size leading to statistical significance for small autocorrelations. For absolute log-losses, the null hypothesis is rejected at all lags, confirming the presence of volatility clustering in the portfolio returns.") %>%
+  kable_classic(full_width = FALSE) %>%
+kable_styling(latex_options = c("scale_down")) %>%
+kable_styling(
+    font_size = 10
+  )
+  # %>%
+  # save_kable(file = paste0(image_path, "/Ljung_Box_Table_Calib.png"))
+
+```
+
+# Statistical Description of the Methods
+
+## Value at Risk and the Two-Stage Framework
+
+Mathematically, Value at Risk (VaR) can be viewed as an extreme quantile of a loss distribution. For a given large confidence level $\alpha$ (e.g., $0.95$ or $0.99$), it is defined as the value $v_\alpha$ such that:
+$$ 1 - \alpha = \bar{F}(v_\alpha) $$
+where $\bar{F}(v_\alpha)$ represents the survival function, or the probability that a loss exceeds the VaR threshold.
+
+However, applying Extreme Value Theory (EVT) directly to raw portfolio losses presents a modeling challenge. The loss series exhibits serial dependence and time-varying volatility (volatility clustering), violating the i.i.d. assumption required for standard EVT inference. Although more advanced EVT frameworks can, in principle, accommodate such features by allowing tail parameters to evolve over time, their implementation is complex at the daily frequency of our data.
+
+To address this issue, we adopt a two-stage methodology designed to recover approximately independent and identically distributed (i.i.d.) innovations prior to tail estimation. Specifically, the log-loss series is first filtered using a dynamic conditional time series model of the form
+
+$$ X_t = \mu_t + \sigma_t Z_t $$
+
+where $\mu_t$ is the conditional mean ($\mu_t = E[X_t \mid \mathcal{F}_{t-1}]$, where $\mathcal{F}_{t-1}$ represent all past information up to time $t-1$), $\sigma_t$ is the conditional standard deviation ($\sigma_t^2 = \text{Var}(X_t \mid \mathcal{F}_{t-1})$), and $Z_t$ represents a zero-mean, unit-variance white noise process of i.i.d. innovations.
+
+This representation separates the predictable dynamics of the series (captured by $\mu_t$ and $\sigma_t$) from the unpredictable component $Z_t$. Under a well-specified model, the standardized residuals $Z_t$ are expected to be approximately i.i.d., making them suitable for Extreme Value Theory analysis.
+
+Therefore, the overall methodology is structured as a two-stage framework. In the first stage, a conditional time series model is fitted to the log-losses in order to remove serial dependence and volatility clustering, yielding standardized residuals. In the second stage, EVT is applied to the tail of these residuals to estimate extreme quantiles and, ultimately, the Value-at-Risk.
+
+The following subsections describe each stage of this procedure in detail.
+
+## Time Series Filtration via AR-GARCH Modeling
+
+To isolate independently and identically distributed innovations for extreme value analysis, an Autoregressive-Generalized Autoregressive Conditional Heteroskedasticity (AR-GARCH) framework was employed.
+
+
+The conditional mean is specified using an Autoregressive AR($k$) process:
+$$\mu_t = \mu + \sum_{i=1}^k \phi_i(X_{t-i} - \mu)$$
+which captures any short-term linear dependence in the series by adjusting the unconditional mean $\mu$ based on past deviations.
+
+Simultaneously, to address the phenomenon of volatility clustering, the conditional variance follows a GARCH($p,q$) specification:
+$$\sigma_t^2 = \omega + \sum_{i=1}^p \alpha_i(X_{t-i} - \mu)^2 + \sum_{j=1}^q \beta_j \sigma_{t-j}^2$$
+
+The variance equation can be interpreted as comprising three components: a strictly positive baseline risk ($\omega$), the market's immediate reaction to recent unpredicted shocks (the ARCH term), and the persistence of past volatility (the GARCH term).
+
+To determine the optimal lag structure $(k,p,q)$, a grid search was conducted. The models were ranked using the Akaike Information Criterion (AIC) and the more conservative Bayesian Information Criterion (BIC), which penalize highly parameterized models to prevent the overfitting of historical noise. 
+
+Model parameters were estimated via Pseudo-Maximum Likelihood (PML) using a Sequential Quadratic Programming (SQP) algorithm to enforce the stationarity and positivity constraints of the variance equation. Under the PML framework, the likelihood function is maximized under an assumption of conditional normality, even though the true distribution of financial returns is known to be heavy-tailed. This approach is theoretically justified because, provided the conditional mean and variance equations are correctly specified, PML yields consistent parameter estimates regardless of the true underlying distribution (McNeil & Frey, 2000).
+
+While the PML approach guarantees consistent parameter estimates, the classical standard errors derived from the inverse of the Hessian matrix are only valid if the assumption of conditional normality holds. Considering the classical standard errors may underestimate the true parameter uncertainty and to obtain valid statistical inference, we also compute robust standard errors using the method of White (1982), which produces asymptotically valid confidence intervals by calculating the covariance ($V$) of the parameters ($\theta$) as $\hat{V} = (-A)^{-1} B (-A)^{-1}$, where $A = L''(\hat{\theta}), B = \sum_{i=1}^{n} g_i(x_i \mid \hat{\theta})^T g_i(x_i \mid \hat{\theta})$. In this formulation, $A$ represents the Hessian matrix and $B$ represents the covariance of the scores at the optimum. The robust standard errors are the square roots of the diagonal elements of $V$ (Ghalanos).
+
+Having established reliable inference for the estimated parameters, we proceed to the interpretation of the filtered series implied by the model. By relying on Gaussian assumption during estimation, the model isolates the volatility clustering while intentionally leaving the true heavy-tail behavior unfiltered in the standardized innovations ($Z_t$). These resulting i.i.d. innovations thus serve as the appropriately filtered inputs for the subsequent Generalized Pareto tail modeling.
+
+## Extreme Value Modeling of the Innovations
+
+With the time series filtered and the standardized innovations ($Z_t$) extracted, the second stage of the framework models the extreme tails of this newly constructed i.i.d. series using the Peaks Over Threshold approach.
+
+According to the Exceedance Theorem, the distribution of exceedances over a sufficiently high threshold $u$ can be asymptotically approximated by a Generalized Pareto Distribution (GPD). If we define the exceedances as $y = z - u$ for all observations where $z > u$, the cumulative distribution function of the GPD is given by: 
+$$ H_{\xi, \sigma}(y) = 1 - \left(1 + \frac{\xi y}{\sigma}\right)_+^{-1/\xi} $$
+where $\sigma > 0$ is the scale parameter, $\xi\neq 0$ is the shape parameter, and $a_+=\max(a, 0)$ for any real $a$.
+
+Implementing the GPD approach requires specifying a threshold $u$, which induces a bias-variance trade-off: too low a threshold introduces bias as the GPD approximation fails for non-extreme data, while too high a threshold increases variance due to too few exceedances. To select an appropriate threshold, we rely on two primary graphical diagnostic tools.
+
+The first is the Mean Residual Life (MRL) plot, which exploits a key property of the GPD: if exceedances above a threshold $u_0$ follow a GPD with parameters $\sigma$ and $\xi$ (with $\xi < 1$), then the expected value of the exceedances over any higher threshold $u > u_0$ is a linear function of $u$, given by
+  $$ \mathbb{E}(Z - u \mid Z > u) = \frac{\sigma + \xi u}{1 - \xi} $$
+The MRL plot graphs the empirical mean excess ($e_n(u) = \frac{\sum_{i=1}^n (Z_i - u) \mathbf{1}_{\{Z_i > u\}}}{\sum_{i=1}^n \mathbf{1}_{\{Z_i > u\}}}$) against a range of thresholds. An appropriate threshold is identified as the lowest value beyond which the plot exhibits an approximately linear trend before becoming overly unstable in the extreme tail.
+
+The second diagnostic is the parameter stability plots. The GPD is uniquely threshold-stable, meaning that if exceedances above a given threshold follow a GPD with shape parameter $\xi$, then exceedances above any higher threshold should share the same $\xi$. In addition, since $\sigma_u = \sigma_{u_0} + \xi(u - u_0)$, we consider a modified scale parameter defined as $\sigma^* = \sigma_u - \hat{\xi} u$. This transformation removes the linear dependence of the standard scale parameter $\sigma_u$ on the threshold u, resulting in constant $\sigma^*$. Hence, we select a threshold within a region where both $\xi$ and $\sigma^*$ remain relatively stable, while also accounting for the increasing uncertainty reflected in widening confidence intervals at higher thresholds.
+
+Once the threshold $u$ is established, the parameters $\hat{\xi}$ and $\hat{\sigma}$ are estimated from the exceedances using Maximum Likelihood Estimation. We then construct a complete, semiparametric model for the cumulative distribution function of the innovations, $\hat{F}_Z(z)$. For observations below the threshold ($z \le u$), we use the empirical distribution function. For the extreme tail ($z > u$), we approximate the survival probability using the fitted GPD scaled by the empirical probability of exceeding the threshold. Mathematically, let $n$ be the total number of observations and $n_u$ be the number of exceedances above $u$. The overall semiparametric distribution function for the tail ($z > u$) is formulated as:
+$$ \hat{F}_Z(z) = 1 - \frac{n_u}{n} \left(1 + \hat{\xi} \frac{z - u}{\hat{\sigma}}\right)^{-1/\hat{\xi}} $$
+By inverting this semiparametric distribution function, we can calculate the extreme quantile of the innovations, $z_\alpha$, for any desired confidence level $\alpha$ (where $\alpha > 1 - n_u/n$). This static EVT quantile is subsequently substituted back into the conditional time series equation ($\text{VaR}_{t+1} = \mu_{t+1} + \sigma_{t+1} z_\alpha$) to get the in-sample Value at Risk.
+
+## VaR Prediction for Testing Period
+
+To generate VaR predictions for the testing period, a rolling window forecasting method is implemented.
+
+For each day $t$ in the testing period, the AR-GARCH model is refitted using a fixed-length rolling window of the most recent $n$ days. The window length $n$ is set equal to the total number of observations in the initial calibration period. This fixed-window approach ensures that the statistical power and parameter stability of the estimators remain consistent with the in-sample model selection phase, while allowing the model to continuously adapt to shifting market regimes by discarding outdated information. From each refitted model, a new sequence of standardized innovations is extracted, and the semiparametric EVT quantile ($z_\alpha$) is re-estimated. The conditional mean and conditional volatility are projected one step ahead to obtain $\mu_{t+1}$ and $\sigma_{t+1}$.  The dynamic, one-step-ahead VaR forecast for day $t+1$ is then computed as $\text{VaR}_{t+1} = \mu_{t+1} + \sigma_{t+1} z_\alpha$. This iterative process produces a complete sequence of out-of-sample VaR forecasts corresponding to each day in the testing period.
+
+## Backtesting: Binomial Test
+
+To evaluate the accuracy of the VaR predictions, the forecasted risk measures are compared against the actual realized portfolio losses over the testing period.  We define a VaR violation as an instance where the realized logarithmic loss on day $t+1$ exceeds the forecasted $\text{VaR}_{t+1}$. Under a perfectly calibrated model with a specified confidence level $\alpha$ (e.g., $0.95$ or $0.99$), the expected proportion of violations is defined as $1 - \alpha$. Assuming the violations are independent, the total number of observed violations, denoted as $x$, over a testing period of $T$ days follows a binomial distribution:$$ x \sim \text{Binomial}(T, 1-\alpha) $$
+We thus use a binomial test, where the null hypothesis is that the empirically observed violation rate equals the expected theoretical rate ($1-\alpha$). Failing to reject the null hypothesis indicates that the AR-GARCH-GPD model adequately captures the portfolio’s tail risk.
+
+
+
+# Results
+
+## AR(k) - GARCH(p,q) Model
+
+As discussed in Section 2, the correlograms suggest volatility clustering, leading to the use of the AR-GARCH model. Utilizing the portfolio-level log losses from the calibration dataset, we ran all combinations of models with $k \in \{0, 1, 2, 3\}, p \in \{1, 2, 3\}, q \in \{0,1, 2, 3\}$. These were standard symmetric GARCH models (assuming positive and negative shocks have the same effect on volatility), and assumed conditional normality (the standardized residuals follow a standard normal distribution, after accounting for volatility with the GARCH model).
+
+The AR(0)-GARCH(1,1) model had the lowest BIC and AIC, and was thus selected (Appendix table \@ref(tab:ar-garch-aic-bic-table) displays the full list of models examined and AIC & BIC scores). The choice of parameters align with the correlograms in figure \@ref(fig:acf-correlogram-figure). The AR(0) component is consistent with the lack of statistically significant autocorrelation in the raw log-losses, while the GARCH(1,1) component captures the volatility clustering observed in the absolute log-losses.
+
+```{r parameter-estimates, include=TRUE, echo=FALSE, results='asis'}
+
+
+knitr::kable(
+ params_table,
+ format = "latex",
+ booktabs = TRUE,
+ escape = FALSE,
+ digits = 4,
+ longtable = FALSE,
+ col.names = c("Estimate", "SE", "Lower", "Upper", "p-val", "SE", "Lower", "Upper", "p-val"),
+ caption = "Parameter estimates for the AR(0)-GARCH(1,1) model fitted to the portfolio calibration dataset. The table provides the point estimates, standard errors, and 95\\% confidence intervals for the mean ($\\mu$), the baseline volatility ($\\omega$), and the ARCH ($\\alpha_1$) and GARCH ($\\beta_1$) coefficients. Classical standard errors rely on the assumption of conditional normality, while robust standard errors account for non-normality of residuals. The statistical significance of the $\\beta_1$ term (p < 0.05) under both robust and normal assumptions confirms the persistence of volatility. $\\alpha_1 + \\beta_1 \\approx 0.995$ suggests a stationary process that reverts to long-term averages slowly.",
+ align = "lcccc"
+) %>%
+kable_styling(latex_options = c("scale_down")) %>%
+kable_styling(
+   font_size = 10
+ )%>%
+add_header_above(c(" " = 1, " " = 1, "Normal Standard Errors (95% CI)" = 4, "Robust Standard Errors (95% CI)" = 4))
+
+
+```
+
+
+The parameter estimates for the AR(0)-GARCH(1,1) model are presented in table \@ref(tab:parameter-estimates). $\mu$ represents the average daily return of the portfolio; this is not statistically significant, suggesting the average return is not significantly different from zero. $\omega$ represents the baseline volatility (the minimum level of volatility the portfolio returns to when there are no recent shocks). $\alpha_1$ represents shock sensitivity - how much yesterday’s sudden shock increases today’s volatility. $\beta_1$ represents the volatility persistence (volatility clustering).
+
+
+$\beta_1$ is statistically significant under both classical (normal) and robust standard errors ($p<0.001$ and $p=0.0378$ respectively), confirming the persistence of volatility within the portfolio; as $\beta_1$ is close to 0.9, we would expect volatility increases to "persist for weeks or months" (“V-Lab: GARCH Volatility Documentation”). $\alpha_1$ appears statistically significant ($p=0.0020$) under assumptions of normality. However, it is no longer significant under robust estimation of standard errors ($p=0.8350$), suggesting this significance was due to the presence of heavy tails in the innovations underestimating standard errors and inflating the perceived impact of one-time shocks, and motivating the use of a Generalized Pareto Distribution (GPD). The sum $\alpha_1 + \beta_1 = 0.995$ is less than $1$, meaning the process is stationary and volatility eventually returns to long-term averages (LTA); however, volatility shocks persist and return to LTA levels slowly as the value is close to $1$. Overall, this suggests that volatility is primarily driven by its historical persistence rather than immediate shocks.
+
+
+```{r ljung-box-tests-post-argarch-table, include=TRUE, echo=FALSE}
+
+
+lb_std_diagnostic_summary_table <- lb_std_diagnostic_summary %>%
+ kbl(booktabs = TRUE,
+     format = "latex",
+     caption = "Ljung-Box test results for the standardized residuals and squared standardized residuals from the AR(0)-GARCH(1,1) model across multiple lags on the calibration dataset. P-values greater than 0.05 across all lags indicate that the null hypothesis cannot be rejected, confirming that the AR(0)-GARCH(1,1) model has accounted for any linear dependence and volatility clustering.",
+     col.names = c("Lag", "Standardized Residuals", "Squared Standardized Residuals")) %>%
+ kable_classic(full_width = FALSE) %>%
+ kable_styling(
+   font_size = 10
+ )%>%
+ # kable_styling(latex_options = "hold_position") %>%
+ add_header_above(c(" " = 1, "Test Statistic (P-Value)" = 2))
+
+
+lb_std_diagnostic_summary_table
+```
+
+
+Table \@ref(tab:ljung-box-tests-post-argarch-table) shows that Ljung-Box tests on both the standardized residuals and squared standardized residuals yield $p > 0.05$, suggesting there continues to be no linear dependence (AR(0)), and the GARCH(1,1) portion of the model captures the volatility clustering previously observed. The ACF charts from figure \@ref(fig:diagnostic-plots-post-argarch) further corroborate these findings. This demonstrates that the AR(0)-GARCH(1,1) model has effectively filtered the data to i.i.d innovations, satisfying the assumption required for GPD estimation.
+
+
+```{r diagnostic-plots-post-argarch, fig.cap="Diagnostic plots for the AR(0)-GARCH(1,1) model on the calibration dataset. The top-left graph displays the standardized residuals ($z_t$) over time (day), with points stably and randomly distributed. The top-right graph is a Normal Q-Q plot of the residuals; the deviation of the sample quantiles from the theoretical normal quantiles in the tails confirms the presence of heavy tails. The bottom-left and bottom-right panels show the ACF of the standardized residuals and squared standardized residuals, respectively. All vertical lines fall within the blue dashed 95% confidence intervals, confirming that the model has successfully accounted for any linear dependence and volatility clustering.", fig.width=7, fig.height=5, echo=FALSE, include=TRUE}
+#now display
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 2),
+   mgp = c(2, 0.7, 0),
+   cex.main = 0.9,
+   cex.lab = 0.9,
+   cex.axis = 0.9)
+
+
+plot(std_residuals_bic, type = "l", main = "Standardized Residuals", ylab = "Residuals", xlab="Time Index (Day Number)")
+
+
+qqnorm(std_residuals_bic, main = "Normal Q-Q Plot")
+qqline(std_residuals_bic, col = "red", lwd = 2)
+
+
+acf(std_residuals_bic, main = paste0("ACF Standardized Residuals"))
+
+
+acf(std_residuals_bic^2, main = paste0("ACF Squared Standardized Residuals"))
+
+
+# Reset layout
+par(mfrow = c(1, 1))
+```
+
+
+The Normal Q-Q plot from figure \@ref(fig:diagnostic-plots-post-argarch) reveals that the residuals have heavy tails, motivating extreme value modelling via the Generalized Pareto Distribution (GPD).
+
+
+## Extreme Value Modelling (GPD)
+
+
+```{r mean-residual-life-plot, fig.cap="Threshold selection diagnostics for the Generalized Pareto Distribution (GPD). The Mean Residual Life Plot (left) displays the mean excess of portfolio log-losses above varying thresholds $u$. A linear trend emerges after between $u=1$ and $u=2$, suggesting the exceedances after those values may follow a GPD. The Parameter Stability Plots (right) show the Modified Scale ($\\sigma^*$) and Shape ($\\hat{\\xi}$) parameters estimated over a range of thresholds. $u=1.6$ is chosen as paramester estimates become relatively stable at that point.", fig.show='hold', out.width="49%",fig.height=5, echo=FALSE, include=TRUE}
+# layout(matrix(c(1, 1, 2, 3), nrow = 2, ncol = 2))
+
+
+par(mar = c(4, 4, 3, 1),
+   cex.main = 1.5,
+   cex.lab = 1.5,
+   cex.axis = 1.5)
+
+
+evd::mrlplot(z, xaxt = "n", main = "")
+abline(v = 1.6, col = "red", lty = 2)
+rug(z, col = "gray50", ticksize = 0.03)
+title("Mean Residual Life Plot")
+axis(side = 1, at = seq(floor(min(z)), ceiling(max(z)), by = 0.5))
+
+
+
+
+par(mfrow = c(2, 1))
+par(mar = c(1, 4, 3, 1), xaxt = "n")
+evd::tcplot(z, tlim = c(u_min, u_max), nt = 30, which = 2)
+title("Parameter Stability")
+abline(v = 1.6, col = "red", lty = 2, lwd = 1.5)
+par(mar = c(4, 4, 0, 1), xaxt = "s")
+evd::tcplot(z, tlim = c(u_min, u_max), nt = 30, which = 1)
+abline(v = 1.6, col = "red", lty = 2, lwd = 1.5)
+
+
+
+
+par(mfrow = c(1, 1))
+```
+
+
+We utilized the Generalized Pareto Distribution for extreme value modelling. A threshold $u=1.6$ was determined based on figure \@ref(fig:mean-residual-life-plot), because the mean excess becomes approximately linear between $1$ and $2$, indicating the exceedances follow GPD; additionally, parameter estimates become stable at this threshold. To ensure robustness of this estimate, an out-of-sample sensitivity analysis was conducted  testing $u$ between $1.1$ and $1.8$ and is displayed in Appendix table \@ref(tab:u-sensitivity-analysis-table), with minimal impacts to violation rates.
+
+
+The GPD model with $u=1.6$ results in MLE estimates for scale and shape parameters of $\hat{\sigma} = 0.4994 (CI: (0.4156, 0.5831)), \hat{\xi} =0.1520 (CI: (0.0342, 0.2698))$. $\hat{\xi} > -0.5$, confirming regularity conditions for MLE are satisfied and ensuring consistency and asymptotic normality of estimates; additionally, $\hat{\xi} > 0$, indicating that the standardized innovations follow a heavy-tailed distribution. A threshold of $u=1.6$ results in $5.63$% of data falling into the tail, and thus into the GPD. Figure \@ref(fig:gpd-calibration-data-plots) show goodness-of-fit diagnostics for the GPD, and confirm that the GPD accurately captures the tail behavior of the portfolio losses. This validation ensures that the subsequent $VaR$ calculations are based on a statistically robust distribution of extreme losses.
+
+
+```{r gpd-calibration-data-plots, fig.cap="Goodness-of-fit diagnostics for the Generalized Pareto Distribution (GPD) with threshold $u=1.6$. The Probability Plot (top-left) and Quantile Plot (top-right) compare the empirical observations against the theoretical GPD model; alignment along the 45-degree diagonal (blue line) confirms that the model provides an accurate fit for the extreme tail of the distribution. The Return Level Plot (bottom-left) displays estimated losses for various return periods (in years); the black line represents the point estimate and the blue lines show the 95% confidence intervals (CIs). The Density Plot (bottom-right) illustrates the fitted GPD density curve on top of the histogram of observed exceedances, confirming the model effectively captures the asymptotic decay of the portfolio's extreme losses.", fig.width=7, fig.height=5, echo=FALSE, include=TRUE}
+
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 2),
+   mgp = c(2, 0.7, 0),
+   cex.main = 0.9,
+   cex.lab = 0.9,
+   cex.axis = 0.9)
+gpd.diag(final_gpd_model)
+par(mfrow = c(1, 1))
+```
+
+
+## In-sample (Calibration Period) VaR
+
+
+```{r insample-var-plot, fig.cap="In-sample Value at Risk (VaR) of the portfolio log-losses during the calibration period. The gray lines represent daily log-losses, while the dashed blue and red lines represent the dynamic 95% and 99% VaR levels, respectively, forecasted by the AR(0)-GARCH(1,1)-GPD model. Blue and red dots indicate breaches where actual losses exceeded the predicted risk thresholds.", fig.width=6, fig.height=4, echo=FALSE, include=TRUE}
+ggplot(calibration_results, aes(x = Date)) +
+ # Daily log-losses in gray
+ geom_line(aes(y = Value), color = "gray80", alpha = 1) +
+ #VaR lines
+ geom_line(aes(y = VaR95, color = "95% VaR"), linetype = "dashed", alpha=0.5) +
+ geom_line(aes(y = VaR99, color = "99% VaR"), linetype = "dashed", alpha=0.5) +
+  # Highlight breaches
+ geom_point(data = subset(calibration_results, Breach == "95% Breach"),
+            aes(y = Value), color = "blue", size = .5) +
+ geom_point(data = subset(calibration_results, Breach == "99% Breach"),
+            aes(y = Value), color = "red", size = 1) +
+  scale_color_manual(values = c("95% VaR" = "blue", "99% VaR" = "red")) +
+ labs(title = "In-Sample (Calibration Period) VaR Backtesting: AR(0)-GARCH(1,1)-GPD",
+      subtitle = paste0("Total Days: ", nrow(calibration_results),
+                        " | 95% Violations: ", violations_95,
+                        " | 99% Violations: ", violations_99),
+      x = "Date",
+      y = "Log Loss",
+      color = "VaR Level") +
+ theme_minimal() +
+ theme(legend.position = "bottom",
+       plot.title = element_text(size = 9, face = "bold"),
+       plot.subtitle = element_text(size = 8),
+       axis.title = element_text(size = 7),
+       axis.text = element_text(size = 6),
+       legend.title = element_text(size = 7),
+       legend.text = element_text(size = 7))
+```
+
+
+The static 95% and 99% return levels for the standardized innovations ($z_{\alpha}$) are $1.6598$ and $2.5870$, respectively. These values represent the quantile thresholds for the shocks, independent of daily volatility. Note that they are higher than the corresponding quantiles of a standard normal distribution (1.6449 and 2.3263, respectively), reflecting the heavy-tailed nature of the innovations.
+
+
+When combined with the daily conditional mean ($\mu_t$) and volatility ($\sigma_t$) forecasted by the AR(0)-GARCH(1,1) model, these thresholds produce daily changing VaR levels, which are displayed in figure \@ref(fig:insample-var-plot); this illustrates how the model adapts its risk boundaries in response to the volatility clustering and extreme spikes observed in the data, maintaining a stable violation rate even during periods of high market stress.
+
+
+Table \@ref(tab:insample-var-exceed-tab) confirms that the GPD-based tail estimation accurately captures the risk profile of the calibration dataset, as violation rates for both 95% and 99% VaR are close to their expected values of 5% and 1%, respectively, with non-statistically significant p-values from the binomial tests ($p > 0.05$). This indicates that the AR(0)-GARCH(1,1)-GPD model is well-calibrated to the in-sample data. Additionally, the fact that the average 99% VaR ($0.0290$) is more than 50% higher than the 95% VaR ($0.0184$) demonstrates that "worst-case" losses are disproportionately larger than typical losses, confirming that the portfolio is prone to extreme, heavy-tailed risks. 
+
+
+```{r}
+
+
+insample_backtest_summary <- data.frame(
+ Metric = c("95% VaR", "99% VaR"),
+ `Total Days` = rep(nrow(calibration_results), 2),
+ `Actual Violations` = c(violations_95, violations_99),
+ `Expected Violations` = c(round(nrow(calibration_results) * 0.05),
+                            round(nrow(calibration_results) * 0.01)),
+ `Actual Violation Rate (%)` = c(round((violations_95 / nrow(calibration_results)) * 100, 2),
+                           round((violations_99 / nrow(calibration_results)) * 100, 2)),
+ `Binomial p-value` = c(round(insample_95_binom$p.value, 4),
+                        round(insample_99_binom$p.value, 4))
+)
+```
+
+
+```{r insample-var-exceed-tab, echo=FALSE, include=TRUE}
+insample_backtest_summary %>%
+ kbl(booktabs = TRUE,
+     format = "latex",
+     caption = "In-sample (calibration period) VaR results for the AR(0)-GARCH(1,1)-GPD model. The table displays the total number of days in the calibration period, the actual number of violations observed for both 95\\% and 99\\% VaR, the expected number of violations, the actual violation rates as percentages, and the p-values from binomial tests assessing whether the observed violation rates differ significantly from the expected rates. Both VaR levels show actual violation rates close to their expected values, with non-statistically significant p-values (p > 0.05).",
+     col.names = c("Level", "Total Days", "Actual Violations", "Expected Violations", "Actual Violation Rate (%)", "Binomial Test P-Value")) %>%
+ kable_classic(full_width = FALSE) %>%
+kable_styling(latex_options = c("scale_down")) %>%
+kable_styling(
+   font_size = 10
+ )
+```
+
+
+## Out-of-sample (Test Period) VaR
+
+
+To confirm the effectiveness of the model, we conducted out-of-sample backtesting on the test period of data, obtaining VaR forecasts using a rolling window approach (utilizing the last 4,671 ($n$) days).
+
+
+Table \@ref(tab:outsample-var-exceed-tab) shows that the model appears to perform well out-of-sample for 95% VaR, with binomial test confirming that the null hypothesis of the observed violation rate equaling the expected rate cannot be rejected ($p>0.05$). However, the model appears to be slightly underestimating risk for 99% VaR as the observed violation rate is higher than expected, and the binomial test rejects the null hypothesis ($p=0.0056<0.05$). Note that this is applicable for all values of $u$ tested as part of sensitivity analysis, suggesting this is not due to the threshold chosen (Appendix table \@ref(tab:u-sensitivity-analysis-table)). This suggests that while the model captures tail risk reasonably well at the 95% level, it may not capture the most extreme losses at the 99% level; the tails of the distribution may be even heavier than what the GPD estimates, or there may be some non-stationarity in the tail behavior that the model does not fully capture. We find that the average 99% VaR ($0.0277$) is still more than 50% higher than the 95% VaR ($0.0174$), slightly lower than the in-sample results ($0.0290, 0.0184$ respectively); this suggests that the rolling model during the test period adapted to periods of lower volatility, leaving it vulnerable to more extreme shocks that may have been underestimated by the model.
+
+
+Figure \@ref(fig:outsample-var-plot) shows that the model successfully captures the volatility clustering and extreme spikes in the test period, particularly during the high-volatility period of early 2020. In contrast to the in-sample results (figure \@ref(fig:insample-var-plot)), the out-of-sample violations appear more evenly distributed over time. This could be attributed to the rolling window approach, which allows the model to continuously re-calibrate its parameters (including $\alpha_1, \beta_1, \omega$) to the most recent market conditions, while the in-sample VaR predictions use the static parameters calculated over the calibration period.
+
+
+
+
+```{r outsample-var-plot, fig.cap="Out-of-sample Value at Risk (VaR) backtesting for the test period using a rolling window AR(0)-GARCH(1,1)-GPD approach. The plot displays daily portfolio log-losses in gray against the dynamically forecasted 95% (blue dashed) and 99% (red dashed) VaR levels. Colored points represent breaches where actual losses exceeded these thresholds. The rolling window allows the model to adapt its parameters to recent market conditions and ensures breaches are not clustered even during periods of high stress (e.g. 2020).", fig.width=6, fig.height=4, echo=FALSE, include=TRUE}
+
+
+ggplot(rolling_backtest_df_rollingu, aes(x = Date)) +
+ # Actual Loss in the background (no legend for this)
+ geom_line(aes(y = Actual_Loss), color = "gray80", alpha = 0.8) +
+  # 95% Level: Grouping line and points under one legend entry
+ geom_line(aes(y = VaR95, color = "95% VaR"), linetype = "dashed", alpha = 0.7) +
+ geom_point(data = filter(rolling_backtest_df_rollingu, Actual_Loss > VaR95 & Actual_Loss <= VaR99),
+            aes(y = Actual_Loss, color = "95% VaR"), size = .5) +
+  # 99% Level: Grouping line and points under one legend entry
+ geom_line(aes(y = VaR99, color = "99% VaR"), linetype = "dashed", alpha = 0.7) + 
+ geom_point(data = filter(rolling_backtest_df_rollingu, Actual_Loss > VaR99),
+            aes(y = Actual_Loss, color = "99% VaR"), size = 1) +
+  # Map the two categories to Blue and Red
+ scale_color_manual(values = c(
+   "95% VaR" = "blue",
+   "99% VaR" = "red"
+ )) +
+  theme_minimal() +
+ labs(title = "Out-of-Sample (Test Period) VaR Backtesting (Rolling Window): AR(0)-GARCH(1,1)-GPD",
+      subtitle = paste0("Total Days: ", n_test_valid_rollingu,
+                        " | 95% Violations: ", v95_test_rollingu,
+                        " | 99% Violations: ", v99_test_rollingu),
+      y = "Log-Loss", x = "Date",
+      color = "VaR") + # Legend Title
+ theme(legend.position = "bottom",
+       plot.title = element_text(size = 9, face = "bold"),
+       plot.subtitle = element_text(size = 8),
+       axis.title = element_text(size = 7),
+       axis.text = element_text(size = 6),
+       legend.title = element_text(size = 7),
+       legend.text = element_text(size = 7)) +
+ # This merges the points and lines into a single aesthetic in the legend
+ guides(color = guide_legend(override.aes = list(shape = c(16, 16), linetype = c(1, 1))))
+```
+
+
+
+
+```{r outsample-var-exceed-tab, echo=FALSE, include=TRUE}
+
+
+
+
+outsample_backtest_summary <- data.frame(
+
+
+Metric = c("95% VaR", "99% VaR"),
+
+
+`Total Days` = rep(n_test_valid_rollingu, 2),
+
+
+`Actual Violations` = c(v95_test_rollingu, v99_test_rollingu),
+
+
+`Expected Violations` = c(round(n_test_valid_rollingu * 0.05),
+
+
+round(n_test_valid_rollingu * 0.01)),
+
+
+`Actual Violation Rate (%)` = c(round(rate_95_rollingu * 100, 2),
+
+
+round(rate_99_rollingu * 100, 2)),
+
+
+`Binomial p-value` = c(round(test_95_binom_rollingu$p.value, 4),
+
+
+round(test_99_binom_rollingu$p.value, 4))
+
+
+)
+
+
+
+
+# Render the table using kableExtra
+
+
+outsample_backtest_summary %>%
+kbl(booktabs = TRUE,
+format = "latex",
+caption = "Out-of-sample (test period) VaR results for the AR(0)-GARCH(1,1)-GPD model. The table displays the total number of days in the calibration period, the actual number of violations observed for both 95\\% and 99\\% VaR, the expected number of violations, the actual violation rates as percentages, and the p-values from binomial tests assessing whether the observed violation rates differ significantly from the expected rates. The 95\\% VaR remains statistically well-calibrated (p = 0.3914), but the 99\\% VaR violation rate of 1.74\\% is significantly higher than the expected 1\\% (p = 0.0056). This suggests that the model slightly underestimated extreme tail risk during the test period, particularly for the most severe losses captured by the 99\\% VaR.",
+col.names = c("Level", "Total Days", "Actual Violations", "Expected Violations", "Actual Violation Rate (%)", "Binomial Test P-Value")) %>%
+kable_classic(full_width = FALSE) %>%
+kable_styling(latex_options = c("scale_down"))
+
+
+```
+
+# Discussion
+
+As discussed in Section 4.4, the VaR backtesting results reveal a discrepancy in the model’s performance at the 95% and 99% VaR, underestimating at the 99% level. While the model successfully captures the risk of moderate losses, it underestimates extreme tail events. The out-of-sample Mean 99% VaR ($0.0277$) was lower than the in-sample average ($0.0290$), indicating that the model recognized the lower average volatility during the 2018–2024 period. However, this left the model more vulnerable to the extreme spikes of the test period (e.g., March 2020). While the GARCH component effectively captures volatility clustering, these results suggest that the GPD estimation may require a longer historical memory to accurately estimate the tail shape during shifting market conditions.
+
+Given the identified limitations in predicting 99% VaR, we recommend further research. One avenue of research is an asymmetric GARCH model. Standard symmetric models assume that a 1% gain and 1% loss have the same impact on volatility. An asymmetric GARCH could result in a model that reacts more aggressively to negative shocks than to positive shocks, which may improve responsiveness to negative shocks and improve tail risk estimation. We also recommend revisiting the assumptions of normality during the AR-GARCH stage. While the current Gaussian Pseudo-Maximum Likelihood approach preserves the heavy tails for the subsequent EVT stage, utilizing a heavy-tailed distribution (such as a Student's t-distribution) during the initial filtration could yield more statistically efficient parameter estimates for the volatility dynamics themselves.  Finally, we recommend examining different methods of incorporating extreme historical events. The current methodology leaves the model vulnerable to long periods of relative calm. One option could be to leave the AR-GARCH as a rolling window, but estimate GPD using an expanded window that includes extreme events, mitigating the loss of extreme observations due to the rolling window.
+
+Additionally, it could be useful to calculate and backtest Expected Shortfall (ES), which is the average loss given that VaR is breached. VaR only identifies that we will cross a threshold, but not by how much; ES would provide a more comprehensive understanding on how severe an extreme event could actually be for the portfolio.
+
+# Conclusion
+
+This report evaluated the effectiveness of utilizing an AR-GARCH-GPD framework to forecast Value at Risk for a portfolio of stocks. By combining a dynamic conditional volatility model (AR-GARCH) with Extreme Value Theory (GPD), we isolated approximately i.i.d. standardized innovations and modeled their heavy-tailed behavior in the extreme tails of the distribution. The empirical results demonstrate that the model delivers accurate and well-calibrated VaR estimates at the 95% confidence level, both in-sample and out-of-sample, showing its robustness in capturing typical market risk and volatility clustering. While the model shows some underestimation at the 99% level during the testing period, this outcome is consistent with the inherent difficulty of modeling the most extreme and rare tail events in financial data. 
+
+Overall, the findings confirm that the AR-GARCH-GPD framework provides a strong and reliable methodology for practical risk management applications, particularly for moderate risk levels. At the same time, the results offer valuable insight into the challenges of extreme tail modeling, suggesting that the model could be refined further for the most extreme cases.
+
+# Acknowledgements
+
+## AI Usage
+
+We acknowledge that we utilized AI for assistance in graph creation, coding debugging and assistance, and report review for spelling, grammar, and flow.
+
+## References
+
+Ghalanos, Alexios. Introduction to the Rugarch Package. (Version 1.4-3). 2022.
+
+McNeil, Alexander J., and Rüdiger Frey. “Estimation of Tail-Related Risk Measures for Heteroscedastic Financial Time Series: An Extreme Value Approach.” Journal of Empirical Finance, vol. 7, no. 3, 1 Nov. 2000, pp. 271–300, www.sciencedirect.com/science/article/abs/pii/S0927539800000128, https://doi.org/10.1016/S0927-5398(00)00012-8.
+
+Victor-Edema, U.A., & Wariboko, A. (2023). Performance of Symmetric and Asymmetric GARCH models in Nigeria's crude oil markets. FNAS Journal of Mathematical and Statistical Computing, 1(1), 1-9.
+
+“V-Lab: GARCH Volatility Documentation.” V-Lab, vlab.stern.nyu.edu/docs/volatility/GARCH.
+
+# Appendix 
+
+```{r ar-garch-aic-bic-table, include=TRUE, echo=FALSE}
+results_cleaned <- results_df %>%
+  select(Model, k, p, q, AIC, BIC) %>%
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+left_half <- results_cleaned %>% filter(k %in% c(0, 1))
+right_half <- results_cleaned %>% filter(k %in% c(2, 3))
+
+diff <- nrow(left_half) - nrow(right_half)
+
+if (diff > 0) {
+  padding <- as.data.frame(matrix(NA, nrow = diff, ncol = ncol(right_half)))
+  colnames(padding) <- colnames(right_half)
+  right_half <- rbind(right_half, padding)
+} else if (diff < 0) {
+  padding <- as.data.frame(matrix(NA, nrow = abs(diff), ncol = ncol(left_half)))
+  colnames(padding) <- colnames(left_half)
+  left_half <- rbind(left_half, padding)
+}
+
+results_split <- cbind(left_half, right_half)
+
+results_split %>%
+  kbl(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Information Criteria Comparison: Grouped by AR order $k \\in \\{0,1\\}$ (left) and $k \\in \\{2,3\\}$ (right).",
+    col.names = rep(c("Model", "k", "p", "q", "AIC", "BIC"), 2),
+    align = "lccccclccccc",
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    font_size = 7,
+    latex_options = c("hold_position", "scale_down")
+  ) %>%
+  #row_spec(2, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(6, border_right = TRUE)
+```
+
+```{r u-sensitivity-analysis-table, include=TRUE, echo=FALSE}
+knitr::kable(
+  final_summary_table,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE, # Allows the LaTeX math formatting in column names
+  align = "cccccccc",
+  col.names = c("$u$ Threshold", "Violations", "Rate (\\%)", "$p$-value", 
+                "Violations", "Rate (\\%)", "$p$-value", "Convergence Failures"),
+  caption = "Out-of-sample VaR sensitivity analysis across various Generalized Pareto Distribution (GPD) thresholds ($u$)."
+) %>%
+  kable_styling(
+    font_size = 7
+  )%>%
+  kable_styling(latex_options = c("scale_down")) %>%
+  add_header_above(c(" " = 1, "95% VaR Performance" = 3, "99% VaR Performance" = 3, " " = 1))
+```

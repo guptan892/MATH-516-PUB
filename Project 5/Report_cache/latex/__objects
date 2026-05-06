@@ -1,0 +1,66 @@
+load libraries	image_path	path	.Random.seed
+load data	data_path	dataset
+examine dataset	
+check NA etc	
+edit dataset	prices_df	prices_df_master	prices_long_master
+plot dataset	
+plot log data	prices_long_master_losses	prices_long_master_losses_plot
+create calib data	calib_data	calib_end_date	calib_start_date
+summ stats calib	calib_summary_stats	summary_stats_table
+acf	abs_losses	comp	companies_list	get_lb	lags_to_test	lb_abs_loss_row	lb_loss_row	lb_results	losses
+unnamed-chunk-1	lb_summary_table
+fit argarch models	best_aic	best_bic	best_fit_aic	best_fit_bic	best_k_aic	best_k_bic	best_p_aic	best_p_bic	best_q_aic	best_q_bic	best_spec_aic	best_spec_bic	portfolio_losses_calib	portfolio_losses_calib_date	results_list
+loop through models	best_aic	best_bic	best_fit_aic	best_fit_bic	best_k_aic	best_k_bic	best_p_aic	best_p_bic	best_q_aic	best_q_bic	best_spec_aic	best_spec_bic	current_aic	current_bic	current_result	fit	ic	k	list_name	p	q	results_list	spec
+examine all results	best_aic_model	best_bic_model	results_df
+unnamed-chunk-2	params_normal	params_robust	params_table
+unnamed-chunk-3	
+check model fit bic	std_residuals_bic
+unnamed-chunk-4	
+check model fit lb test bic	lb_results_bic	lb_std	lb_std_diagnostic_summary	lb_std_sq
+check model fit diagnostic plots bic	
+extreme value modelling mean residual life	z
+look at u quantiles	u_max	u_min
+plot stability	
+test different thresholds	automated_u	final_u	u_quantile
+get mle estimates of gpd parameters	conv_status	deviance	epsilon	est_table	estimates	final_gpd_model	n_total	n_u	prop_u	se	se_table	sigma_u	threshold
+use fpot	epsilon_fpot	final_gpd_model_fpot	sigma_u_fpot
+get param ci	ci_fpot	lower_scale	lower_shape	upper_scale	upper_shape	z_val
+plot gpd fitted	
+build cdf	F_hat_u	n	n_u
+calculate quantiles	z_95	z_99
+compute in-sample VAR	calibration_results	insample_VaR_95	insample_VaR_99	mu_fitted	sigma_fitted	violations_95	violations_99
+plot VAR violations insample	calibration_results
+unnamed-chunk-5	mean_VaR95	mean_VaR99
+biniomial test insample	insample_95_binom	insample_99_binom
+unnamed-chunk-6	convergence_failures	n_test	n_window	portfolio_losses_full	portfolio_losses_full_date	rolling_VaR95	rolling_VaR99	test_end_date	test_end_idx	test_indices	test_start_date	test_start_idx
+rolling test	convergence_failures	epsilon_roll	i	mu_next	n_total	n_u_roll	rolling_VaR95	rolling_VaR99	sig_u_roll	sigma_next	target_idx	temp_fcst	temp_fit	temp_gpd	window_data	z_temp	z95_roll	z99_roll
+unnamed-chunk-7	rolling_backtest_df
+backtesting	n_test_valid	rate_95	rate_99	v95_test	v99_test
+biniomial test test	test_95_binom	test_99_binom
+backtesting plots	
+unnamed-chunk-8	
+unnamed-chunk-9	convergence_failures_rollingu	n_window	rolling_VaR95_rollingu	rolling_VaR99_rollingu
+rolling test rolling u	convergence_failures_rollingu	epsilon_roll	i	mu_next	n_total	n_u_roll	rolling_VaR95_rollingu	rolling_VaR99_rollingu	sig_u_roll	sigma_next	target_idx	temp_fcst	temp_final_u	temp_fit	temp_gpd	window_data	z_temp	z95_roll	z99_roll
+unnamed-chunk-10	rolling_backtest_df_rollingu
+backtesting rolling u	n_test_valid_rollingu	rate_95_rollingu	rate_99_rollingu	v95_test_rollingu	v99_test_rollingu
+unnamed-chunk-11	mean_outsample_95	mean_outsample_99
+biniomial test test rolling u	test_95_binom_rollingu	test_99_binom_rollingu
+backtesting plots rolling u	
+rolling u sensitivity analysis	all_rolling_dfs	backtest_summaries	binom95_p_temp	binom99_p_temp	convergence_failures	epsilon_roll	i	mu_next	n_total	n_u_roll	n_valid_temp	rate95_temp	rate99_temp	rolling_VaR95_rollingu	rolling_VaR99_rollingu	sig_u_roll	sigma_next	target_idx	temp_df_u	temp_fcst	temp_fit	temp_gpd	u_fixed	u_values_to_test	v95_temp	v99_temp	window_data	z_temp	z95_roll	z99_roll
+unnamed-chunk-12	final_summary_table
+daily-log-losses-figure	
+summary-statistics-table	calib_summary_stats
+acf-correlogram-figure	abs_losses	losses
+ljung-box-table-initial	lags_to_test	lb_abs_loss_row_display	lb_flipped	lb_loss_row_display	lb_results_display
+parameter-estimates	
+ljung-box-tests-post-argarch-table	lb_std_diagnostic_summary_table
+diagnostic-plots-post-argarch	
+mean-residual-life-plot	
+gpd-calibration-data-plots	
+insample-var-plot	
+unnamed-chunk-13	insample_backtest_summary
+insample-var-exceed-tab	
+outsample-var-plot	
+outsample-var-exceed-tab	outsample_backtest_summary
+ar-garch-aic-bic-table	diff	left_half	results_cleaned	results_split	right_half
+u-sensitivity-analysis-table	
